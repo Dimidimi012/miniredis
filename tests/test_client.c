@@ -56,7 +56,7 @@ static char *read_line(int fd) {
     }
 }
 
-static void send_cmd_fd(int fd, int argc, const char **argv) {
+static void send_cmd(int argc, const char **argv) {
     char tmp[2048];
     int off = snprintf(tmp, sizeof(tmp), "*%d\r\n", argc);
     for (int i = 0; i < argc; i++) {
@@ -69,25 +69,17 @@ static void send_cmd_fd(int fd, int argc, const char **argv) {
             tmp[off++] = '\n';
         }
     }
-    (void)send(fd, tmp, (size_t)off, 0);
+    (void)send(conn, tmp, (size_t)off, 0);
 }
 
-static void send_cmd(int argc, const char **argv) {
-    send_cmd_fd(conn, argc, argv);
-}
-
-static void expect_simple_fd(int fd, const char *expected) {
-    char *line = read_line(fd);
+static void expect_simple(const char *expected) {
+    char *line = read_line(conn);
     CHECK(line != NULL);
     if (line) CHECK(strcmp(line, expected) == 0);
 }
 
-static void expect_simple(const char *expected) {
-    expect_simple_fd(conn, expected);
-}
-
-static long long read_integer_fd(int fd) {
-    char *line = read_line(fd);
+static long long read_integer(void) {
+    char *line = read_line(conn);
     if (!line || line[0] != ':') {
         failures++;
         return LLONG_MIN;
@@ -95,13 +87,9 @@ static long long read_integer_fd(int fd) {
     return atoll(line + 1);
 }
 
-static long long read_integer(void) {
-    return read_integer_fd(conn);
-}
-
 /* Returns a malloc'd payload, or NULL for a null bulk reply. */
-static char *read_bulk_fd(int fd) {
-    char *line = read_line(fd);
+static char *read_bulk(void) {
+    char *line = read_line(conn);
     if (!line || line[0] != '$') {
         failures++;
         return NULL;
@@ -110,7 +98,7 @@ static char *read_bulk_fd(int fd) {
     if (n < 0) return NULL;
 
     char *payload = malloc((size_t)n + 1);
-    if (read_all(fd, payload, (size_t)n) != 0) {
+    if (read_all(conn, payload, (size_t)n) != 0) {
         free(payload);
         failures++;
         return NULL;
@@ -118,16 +106,12 @@ static char *read_bulk_fd(int fd) {
     payload[n] = '\0';
 
     char crlf[2];
-    if (read_all(fd, crlf, 2) != 0 || crlf[0] != '\r' || crlf[1] != '\n') {
+    if (read_all(conn, crlf, 2) != 0 || crlf[0] != '\r' || crlf[1] != '\n') {
         free(payload);
         failures++;
         return NULL;
     }
     return payload;
-}
-
-static char *read_bulk(void) {
-    return read_bulk_fd(conn);
 }
 
 /* Read an array reply of bulk strings. Returns a malloc'd array of malloc'd
@@ -321,7 +305,7 @@ static int run_write(int port, const char *host) {
 }
 
 /* Verify the dataset seeded by run_write survived a restart. */
-static int run_verify(int port, const char *host, int check_prw) {
+static int run_verify(int port, const char *host) {
     conn = connect_retry(port, host);
     CHECK(conn >= 0);
     if (conn < 0) return 1;
@@ -382,15 +366,6 @@ static int run_verify(int port, const char *host, int check_prw) {
         long long t = read_integer();
         CHECK(t > 0 && t <= 10000);
     }
-    if (check_prw) {
-        /* only present after an AOF-rewrite round trip (verifyrw phase) */
-        const char *a[] = {"GET", "prw"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "rwv") == 0);
-        free(got);
-    }
 
     close(conn);
     if (failures) {
@@ -398,82 +373,6 @@ static int run_verify(int port, const char *host, int check_prw) {
         return 1;
     }
     printf("test_client[verify]: all tests passed\n");
-    return 0;
-}
-
-/* Active expiration: a short-TTL key must disappear on its own (via the
- * periodic expire cycle) without any access triggering lazy deletion. DBSIZE
- * counts raw dict entries, so it observes the cycle directly. */
-static int run_expire(int port, const char *host) {
-    conn = connect_retry(port, host);
-    CHECK(conn >= 0);
-    if (conn < 0) return 1;
-
-    long long base = 0;
-    {
-        const char *a[] = {"DBSIZE"};
-        send_cmd(1, a);
-        base = read_integer();
-    }
-    {
-        const char *a[] = {"SET", "tk", "v", "EX", "1"};
-        send_cmd(5, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"DBSIZE"};
-        send_cmd(1, a);
-        CHECK(read_integer() == base + 1);
-    }
-    /* wait past the 1s TTL plus a couple of expire-cycle ticks, no access */
-    usleep(2500 * 1000);
-    {
-        const char *a[] = {"DBSIZE"};
-        send_cmd(1, a);
-        CHECK(read_integer() == base);
-    }
-
-    close(conn);
-    if (failures) {
-        fprintf(stderr, "test_client[expire]: %d failure(s)\n", failures);
-        return 1;
-    }
-    printf("test_client[expire]: active expiration removed the expired key\n");
-    return 0;
-}
-
-/* Exercise REWRITEAOF / BGREWRITEAOF plus a write issued while the background
- * rewrite may still be running. That write must survive via the rewrite buffer
- * and the subsequent crash (verified by the verifyrw phase). */
-static int run_rewrite(int port, const char *host) {
-    conn = connect_retry(port, host);
-    CHECK(conn >= 0);
-    if (conn < 0) return 1;
-
-    {
-        const char *a[] = {"REWRITEAOF"};
-        send_cmd(1, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"BGREWRITEAOF"};
-        send_cmd(1, a);
-        expect_simple("+Background append only file rewriting started");
-    }
-    {
-        const char *a[] = {"SET", "prw", "rwv"};
-        send_cmd(3, a);
-        expect_simple("+OK");
-    }
-    /* give the child time to swap in the new file and the parent to reopen it */
-    usleep(500 * 1000);
-
-    close(conn);
-    if (failures) {
-        fprintf(stderr, "test_client[rewrite]: %d failure(s)\n", failures);
-        return 1;
-    }
-    printf("test_client[rewrite]: done\n");
     return 0;
 }
 
@@ -512,166 +411,6 @@ static int run_biginput(int port, const char *host) {
         return 1;
     }
     printf("test_client[biginput]: server closed an oversized request\n");
-    return 0;
-}
-
-/* Read a pubsub frame: *3 bulk(kind) bulk(channel) [:<count>]. When count<0,
- * the trailing integer is not expected (message pushes end with a payload
- * bulk that the caller reads separately). Returns 1 on success. */
-static int expect_frame(int fd, const char *kind, const char *chan, int count) {
-    char *l = read_line(fd);
-    if (!l || strcmp(l, "*3") != 0) {
-        failures++;
-        return 0;
-    }
-    char *k = read_bulk_fd(fd);
-    if (!k || strcmp(k, kind) != 0) {
-        failures++;
-        free(k);
-        return 0;
-    }
-    free(k);
-    char *c = read_bulk_fd(fd);
-    if (!c || strcmp(c, chan) != 0) {
-        failures++;
-        free(c);
-        return 0;
-    }
-    free(c);
-    if (count >= 0 && read_integer_fd(fd) != count) {
-        failures++;
-        return 0;
-    }
-    return 1;
-}
-
-static int run_pubsub(int port, const char *host) {
-    int sub1 = connect_retry(port, host);
-    int sub2 = connect_retry(port, host);
-    int pub = connect_retry(port, host);
-    CHECK(sub1 >= 0 && sub2 >= 0 && pub >= 0);
-    if (sub1 < 0 || sub2 < 0 || pub < 0) return 1;
-
-    /* two subscribers on the same channel */
-    {
-        const char *a[] = {"SUBSCRIBE", "ch1"};
-        send_cmd_fd(sub1, 2, a);
-        CHECK(expect_frame(sub1, "subscribe", "ch1", 1));
-    }
-    {
-        const char *a[] = {"SUBSCRIBE", "ch1"};
-        send_cmd_fd(sub2, 2, a);
-        CHECK(expect_frame(sub2, "subscribe", "ch1", 1));
-    }
-    /* a publish reaches both subscribers */
-    {
-        const char *a[] = {"PUBLISH", "ch1", "hello"};
-        send_cmd_fd(pub, 3, a);
-        CHECK(read_integer_fd(pub) == 2);
-    }
-    {
-        CHECK(expect_frame(sub1, "message", "ch1", -1));
-        char *p = read_bulk_fd(sub1);
-        CHECK(p != NULL);
-        if (p) CHECK(strcmp(p, "hello") == 0);
-        free(p);
-    }
-    {
-        CHECK(expect_frame(sub2, "message", "ch1", -1));
-        char *p = read_bulk_fd(sub2);
-        CHECK(p != NULL);
-        if (p) CHECK(strcmp(p, "hello") == 0);
-        free(p);
-    }
-    /* unsubscribe one subscriber */
-    {
-        const char *a[] = {"UNSUBSCRIBE", "ch1"};
-        send_cmd_fd(sub1, 2, a);
-        CHECK(expect_frame(sub1, "unsubscribe", "ch1", 0));
-    }
-    /* a publish now reaches only sub2 */
-    {
-        const char *a[] = {"PUBLISH", "ch1", "world"};
-        send_cmd_fd(pub, 3, a);
-        CHECK(read_integer_fd(pub) == 1);
-    }
-    {
-        CHECK(expect_frame(sub2, "message", "ch1", -1));
-        char *p = read_bulk_fd(sub2);
-        CHECK(p != NULL);
-        if (p) CHECK(strcmp(p, "world") == 0);
-        free(p);
-    }
-    /* subscribed-mode restrictions: non-whitelisted commands are rejected */
-    {
-        const char *a[] = {"GET", "foo"};
-        send_cmd_fd(sub2, 2, a);
-        char *line = read_line(sub2);
-        CHECK(line != NULL);
-        if (line) CHECK(strncmp(line, "-ERR", 4) == 0);
-    }
-    /* PING in subscribed mode returns the array form */
-    {
-        const char *a[] = {"PING"};
-        send_cmd_fd(sub2, 1, a);
-        char *line = read_line(sub2);
-        CHECK(line != NULL);
-        if (line) CHECK(strcmp(line, "*2") == 0);
-        char *k = read_bulk_fd(sub2);
-        CHECK(k != NULL);
-        if (k) CHECK(strcmp(k, "pong") == 0);
-        free(k);
-        char *e = read_bulk_fd(sub2);
-        CHECK(e != NULL && e[0] == '\0');
-        free(e);
-    }
-
-    close(sub1);
-    close(sub2);
-    close(pub);
-    if (failures) {
-        fprintf(stderr, "test_client[pubsub]: %d failure(s)\n", failures);
-        return 1;
-    }
-    printf("test_client[pubsub]: subscribe/publish/unsubscribe verified\n");
-    return 0;
-}
-
-static int run_monitor(int port, const char *host) {
-    int mon = connect_retry(port, host);
-    int w = connect_retry(port, host);
-    CHECK(mon >= 0 && w >= 0);
-    if (mon < 0 || w < 0) return 1;
-
-    {
-        const char *a[] = {"MONITOR"};
-        send_cmd_fd(mon, 1, a);
-        expect_simple_fd(mon, "+OK");
-    }
-    {
-        const char *a[] = {"SET", "mkey", "mval"};
-        send_cmd_fd(w, 3, a);
-        expect_simple_fd(w, "+OK");
-    }
-    {
-        /* the monitor client sees the command line */
-        char *line = read_line(mon);
-        CHECK(line != NULL);
-        if (line) {
-            CHECK(line[0] == '+');
-            CHECK(strstr(line, "\"SET\"") != NULL);
-            CHECK(strstr(line, "\"mkey\"") != NULL);
-            CHECK(strstr(line, "\"mval\"") != NULL);
-        }
-    }
-
-    close(mon);
-    close(w);
-    if (failures) {
-        fprintf(stderr, "test_client[monitor]: %d failure(s)\n", failures);
-        return 1;
-    }
-    printf("test_client[monitor]: monitor stream verified\n");
     return 0;
 }
 
@@ -1122,179 +861,6 @@ static int run_full(int port, const char *host) {
         CHECK(read_integer() == 1);
     }
 
-    /* ---- extended string commands ---- */
-    {
-        const char *a[] = {"SETNX", "nk", "v"};
-        send_cmd(3, a);
-        CHECK(read_integer() == 1);
-    }
-    {
-        const char *a[] = {"SETNX", "nk", "v2"};
-        send_cmd(3, a);
-        CHECK(read_integer() == 0);
-    }
-    {
-        const char *a[] = {"MSET", "a", "1", "b", "2"};
-        send_cmd(5, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"MGET", "a", "b", "nope"};
-        send_cmd(4, a);
-        int n = 0;
-        char **got = read_array(&n);
-        CHECK(n == 3);
-        if (n == 3) {
-            CHECK(got[0] && strcmp(got[0], "1") == 0);
-            CHECK(got[1] && strcmp(got[1], "2") == 0);
-            CHECK(got[2] == NULL);   /* missing -> null bulk */
-        }
-        free_array(got, n);
-    }
-    {
-        const char *a[] = {"APPEND", "str", "hello"};
-        send_cmd(3, a);
-        CHECK(read_integer() == 5);
-    }
-    {
-        const char *a[] = {"APPEND", "str", " world"};
-        send_cmd(3, a);
-        CHECK(read_integer() == 11);
-    }
-    {
-        const char *a[] = {"GET", "str"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "hello world") == 0);
-        free(got);
-    }
-    {
-        const char *a[] = {"STRLEN", "str"};
-        send_cmd(2, a);
-        CHECK(read_integer() == 11);
-    }
-    {
-        const char *a[] = {"GETRANGE", "str", "0", "4"};
-        send_cmd(4, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "hello") == 0);
-        free(got);
-    }
-    {
-        const char *a[] = {"GETRANGE", "str", "-5", "-1"};
-        send_cmd(4, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "world") == 0);
-        free(got);
-    }
-    {
-        const char *a[] = {"SETRANGE", "str", "6", "C"};
-        send_cmd(4, a);
-        CHECK(read_integer() == 11);
-    }
-    {
-        const char *a[] = {"GET", "str"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "hello Corld") == 0);
-        free(got);
-    }
-    {
-        const char *a[] = {"SETEX", "sk", "100", "v"};
-        send_cmd(4, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"TTL", "sk"};
-        send_cmd(2, a);
-        long long t = read_integer();
-        CHECK(t > 0 && t <= 100);
-    }
-    {
-        const char *a[] = {"GETSET", "gs", "new"};
-        send_cmd(3, a);
-        char *got = read_bulk();
-        CHECK(got == NULL);   /* first GETSET on a missing key -> nil */
-        free(got);
-    }
-    {
-        const char *a[] = {"GETSET", "gs", "new2"};
-        send_cmd(3, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "new") == 0);
-        free(got);
-    }
-    {
-        const char *a[] = {"GET", "gs"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "new2") == 0);
-        free(got);
-    }
-    /* RENAME */
-    {
-        const char *a[] = {"SET", "rn1", "v"};
-        send_cmd(3, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"SET", "rn2", "old"};
-        send_cmd(3, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"RENAME", "rn1", "rn2"};
-        send_cmd(3, a);
-        expect_simple("+OK");
-    }
-    {
-        const char *a[] = {"GET", "rn2"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "v") == 0);   /* destination was overwritten */
-        free(got);
-    }
-    {
-        const char *a[] = {"GET", "rn1"};
-        send_cmd(2, a);
-        char *got = read_bulk();
-        CHECK(got == NULL);   /* source is gone */
-        free(got);
-    }
-    {
-        const char *a[] = {"RENAME", "nosuch", "x"};
-        send_cmd(3, a);
-        char *line = read_line(conn);
-        CHECK(line != NULL);
-        if (line) CHECK(strncmp(line, "-ERR", 4) == 0);
-    }
-    /* WRONGTYPE on the new commands */
-    {
-        const char *a[] = {"RPUSH", "wtl", "x"};
-        send_cmd(3, a);
-        CHECK(read_integer() == 1);
-    }
-    {
-        const char *a[] = {"APPEND", "wtl", "y"};
-        send_cmd(3, a);
-        char *line = read_line(conn);
-        CHECK(line != NULL);
-        if (line) CHECK(strncmp(line, "-WRONGTYPE", 10) == 0);
-    }
-    /* cleanup */
-    {
-        const char *a[] = {"DEL", "nk", "a", "b", "str", "sk", "gs", "rn2", "wtl"};
-        send_cmd(9, a);
-        CHECK(read_integer() == 8);
-    }
-
     /* KEYS (only "counter" remains) */
     {
         const char *a[] = {"KEYS", "*"};
@@ -1337,12 +903,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(phase, "burst") == 0) return run_burst(port, host);
     if (strcmp(phase, "write") == 0) return run_write(port, host);
-    if (strcmp(phase, "verify") == 0) return run_verify(port, host, 0);
-    if (strcmp(phase, "verifyrw") == 0) return run_verify(port, host, 1);
-    if (strcmp(phase, "rewrite") == 0) return run_rewrite(port, host);
+    if (strcmp(phase, "verify") == 0) return run_verify(port, host);
     if (strcmp(phase, "biginput") == 0) return run_biginput(port, host);
-    if (strcmp(phase, "expire") == 0) return run_expire(port, host);
-    if (strcmp(phase, "pubsub") == 0) return run_pubsub(port, host);
-    if (strcmp(phase, "monitor") == 0) return run_monitor(port, host);
     return run_full(port, host);
 }

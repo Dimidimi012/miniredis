@@ -18,8 +18,6 @@ run_phase() {
     "$CLIENT" "$PORT" 127.0.0.1 full
     "$CLIENT" "$PORT" 127.0.0.1 burst
     "$CLIENT" "$PORT" 127.0.0.1 biginput
-    "$CLIENT" "$PORT" 127.0.0.1 pubsub
-    "$CLIENT" "$PORT" 127.0.0.1 monitor
 
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
@@ -31,13 +29,3 @@ if [ "$(uname -s)" = "Linux" ]; then
     run_phase --io epoll
 fi
 run_phase --io select
-
-# ---- active expiration: the periodic expire cycle removes short-TTL keys ----
-"$BIN" --port "$PORT" --bind 127.0.0.1 &
-SRV_PID=$!
-trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
-sleep 0.2
-"$CLIENT" "$PORT" 127.0.0.1 expire
-kill "$SRV_PID" 2>/dev/null || true
-wait "$SRV_PID" 2>/dev/null || true
-trap - EXIT

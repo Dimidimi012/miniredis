@@ -170,8 +170,9 @@ make test-integration  # 启动服务器 + test_client 端到端断言
 make test              # 全部
 ```
 
-测试覆盖：整数解析边界、glob 匹配、哈希表增删改查/二进制键/扩容/迭代、RESP 完整与
-残缺帧、以及一条完整的 `PING/SET/GET/INCR/EXPIRE/TTL/KEYS/未知命令` 链路。
+测试覆盖：整数解析边界、glob 匹配、**SipHash 已知向量**、哈希表增删改查/二进制键/扩容/
+迭代、RESP 完整与残缺帧、一条完整的 `PING/SET/GET/INCR/EXPIRE/TTL/KEYS/未知命令` 链路、
+并发 `burst` 压力、**超大请求断连（biginput，>64MB）**、以及 AOF/RDB 两条持久化恢复链路。
 
 ---
 
