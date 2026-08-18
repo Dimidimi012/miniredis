@@ -1,0 +1,4 @@
+# Force LF line endings in the repository and on checkout so the Makefile
+# and shell scripts behave identically on Linux/macOS regardless of the
+# platform that committed them.
+* text=auto eol=lf

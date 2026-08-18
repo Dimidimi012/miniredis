@@ -1,0 +1,165 @@
+# miniredis
+
+一个用标准 C11 编写的、**兼容 Redis 协议（RESP）的轻量级内存键值数据库**。
+它实现了一个真实的 TCP 服务器，你可以直接用官方 `redis-cli` 连上去操作，用
+`redis-benchmark` 压测，甚至把它当作一个可运行的小型缓存使用——不是玩具，而是一个
+端到端可用、可验证的系统级项目。
+
+```text
+$ make
+$ ./miniredis --port 6379
+
+# 另一个终端
+$ redis-cli -p 6379
+127.0.0.1:6379> SET user:1 "alice"
+OK
+127.0.0.1:6379> GET user:1
+"alice"
+127.0.0.1:6379> INCR visits
+(integer) 1
+127.0.0.1:6379> EXPIRE user:1 60
+(integer) 1
+127.0.0.1:6379> TTL user:1
+(integer) 60
+```
+
+---
+
+## 特性
+
+- **RESP 协议**：完整解析客户端请求（数组 / 批量字符串 / 简单字符串），正确处理
+  TCP 粘包/半包（增量解析，等待完整帧后再执行）。
+- **非阻塞 I/O 事件循环**：基于 `select()` 的单线程事件循环，同时管理多个客户端，
+  支持非阻塞读写与优雅关闭。
+- **手写哈希表**：链地址法 + 2 的幂桶大小 + 0.75 负载因子扩容 + 每实例随机种子，
+  键值均**二进制安全**（显式长度，可存任意字节）。
+- **过期机制**：`EXPIRE`/`PEXPIRE`/`SET ... EX/PX`，惰性删除（读时判断）+ 精确到毫秒。
+- **命令丰富**：字符串、自增自减（含溢出检查）、TTL、KEYS（支持 glob：`*` `?` `[...]`）、
+  TYPE、INFO 等。
+- **工程完整**：Makefile + CMake、单元测试 + 端到端测试、`-Wall -Wextra -Wpedantic`、
+  README + 架构说明。
+
+### 已支持命令
+
+| 类别 | 命令 |
+|---|---|
+| 连接 | `PING` `ECHO` `QUIT` `SELECT` |
+| 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `INCR` `DECR` |
+| 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
+| 过期 | `EXPIRE` `PEXPIRE` `TTL` `PTTL` |
+| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` |
+
+未实现的命令会返回标准错误：`-ERR unknown command '...'`。
+
+---
+
+## 快速开始
+
+依赖：`cc`（GCC/Clang）与 `make`。目标平台为 **Linux / macOS**（Windows 请用 WSL 或
+MSYS2/MinGW）。
+
+```bash
+make            # 构建 ./miniredis
+make test       # 单元测试 + 端到端测试
+./miniredis --help
+./miniredis --bind 127.0.0.1 --port 6379
+```
+
+用官方客户端验证（推荐，最能体现"实用"）：
+
+```bash
+redis-cli -p 6379 PING          # PONG
+redis-cli -p 6379 SET k v       # OK
+redis-cli -p 6379 GET k         # "v"
+redis-benchmark -p 6379 -n 100000 -c 50 -t set,get
+```
+
+没有 `redis-cli` 也可以：`make test` 里的 `tests/test_client` 是一个零依赖的 RESP
+客户端，直接对协议做断言。
+
+---
+
+## 架构
+
+```text
+                     ┌─────────────────────────────────────┐
+  redis-cli / 客户端 ──►│  server.c  单线程 select() 事件循环  │
+                     │   accept / 非阻塞 read / 非阻塞 write │
+                     └───────────────────┬─────────────────┘
+                                         │ 完整命令 (command)
+                                         ▼
+                     ┌─────────────────────────────────────┐
+                     │  resp.c    RESP 增量解析器           │
+                     │  处理粘包/半包，产出 argv[]          │
+                     └───────────────────┬─────────────────┘
+                                         ▼
+                     ┌─────────────────────────────────────┐
+                     │  db.c      命令分发 + 业务处理        │
+                     │  lookup_key 惰性过期 → dict 读写      │
+                     └───────────────────┬─────────────────┘
+                                         ▼
+                     ┌─────────────────────────────────────┐
+                     │  dict.c    哈希表 / object.c 值对象   │
+                     │  dynbuf.c  动态缓冲（请求/响应/粘包）  │
+                     └─────────────────────────────────────┘
+```
+
+### 模块划分
+
+| 文件 | 职责 |
+|---|---|
+| `src/server.c` | TCP 服务器、`select()` 事件循环、客户端读写缓冲、信号处理 |
+| `src/resp.c` | RESP 协议解析（增量、边界安全、上限保护） |
+| `src/db.c` | 键值存储、命令分发表、惰性过期、各命令实现 |
+| `src/dict.c` | 通用哈希表（`dict_set/get/delete` + 迭代器） |
+| `src/object.c` | 值对象 `robj`（二进制安全字符串 + 过期时间戳） |
+| `src/dynbuf.c` | 可增长字节缓冲（类似 Redis 的 sds） |
+| `src/util.c` | `xmalloc` 系列、日志、毫秒时钟、严格整数解析、glob 匹配 |
+
+### 关键设计点
+
+- **粘包/半包处理**：每个客户端维护一个输入缓冲 `dynbuf in`，`resp_parse_command`
+  在缓冲不足时返回"需要更多数据"而不阻塞或误判；一次 `recv` 后循环解析出尽可能多的
+  完整命令。
+- **内存所有权清晰**：`dict` 复制键并接管值（`robj*`），`command` 拥有其 `argv`；
+  替换/删除时由调用方释放旧值，避免悬挂指针与泄漏。
+- **惰性过期**：读路径统一走 `lookup_key()`，命中即检查 `expire_at`，过期则删除并
+  返回不存在，保证对外语义一致。
+
+---
+
+## 测试
+
+```bash
+make test-unit         # test_util / test_dict / test_resp（不依赖网络）
+make test-integration  # 启动服务器 + test_client 端到端断言
+make test              # 全部
+```
+
+测试覆盖：整数解析边界、glob 匹配、哈希表增删改查/二进制键/扩容/迭代、RESP 完整与
+残缺帧、以及一条完整的 `PING/SET/GET/INCR/EXPIRE/TTL/KEYS/未知命令` 链路。
+
+---
+
+## 性能说明
+
+当前 MVP 使用 `select()`，受 `FD_SETSIZE`（默认 1024）限制，单线程串行处理命令。
+`redis-benchmark` 下 SET/GET 通常可到数万 ~ 十几万 QPS（视机器而定）。这是**刻意保持
+简单**的起点，下一阶段替换为 `epoll`（Linux）事件循环后可支撑数万并发连接。
+
+---
+
+## Roadmap（后续迭代方向）
+
+- [ ] `epoll`/`kqueue` 事件循环（提升并发与吞吐）
+- [ ] 持久化：AOF 追加日志 + RDB 快照、崩溃恢复
+- [ ] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
+- [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
+- [ ] 抗哈希洪水攻击：SipHash + `getrandom()` 真随机种子
+- [ ] 主从复制、`MONITOR`、`PUB/SUB`
+
+---
+
+## 许可
+
+MIT

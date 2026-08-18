@@ -1,0 +1,14 @@
+# build artifacts
+miniredis
+*.o
+*.a
+*.so
+
+# compiled test binaries
+tests/test_util
+tests/test_dict
+tests/test_resp
+tests/test_client
+
+# CMake build directory
+build/
