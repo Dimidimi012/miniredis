@@ -5,12 +5,15 @@
  *   phase: full  - the main command battery (default)
  *          burst - N concurrent connections, each issuing many PINGs */
 #include <arpa/inet.h>
+#include <errno.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -370,6 +373,44 @@ static int run_verify(int port, const char *host) {
         return 1;
     }
     printf("test_client[verify]: all tests passed\n");
+    return 0;
+}
+
+/* Send an incomplete request larger than the server's 64MB input cap and
+ * verify the server drops the connection (memory-DoS protection). */
+static int run_biginput(int port, const char *host) {
+    signal(SIGPIPE, SIG_IGN);
+
+    int fd = connect_retry(port, host);
+    CHECK(fd >= 0);
+    if (fd < 0) return 1;
+
+    /* recv timeout so the test cannot hang if the server fails to close. */
+    struct timeval tv = {5, 0};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Declare a 100MB bulk string, then stream just over the 64MB cap. */
+    const char *hdr = "*1\r\n$100000000\r\n";
+    (void)send(fd, hdr, strlen(hdr), 0);
+
+    char chunk[65536];
+    memset(chunk, 'x', sizeof(chunk));
+    for (int i = 0; i < 1024; i++) {   /* 64MB total (+ header) */
+        ssize_t w = send(fd, chunk, sizeof(chunk), 0);
+        if (w < 0) break;              /* server closed while we were writing */
+    }
+
+    char b;
+    ssize_t r = recv(fd, &b, 1, 0);
+    int closed = (r == 0) || (r < 0 && errno == ECONNRESET);
+    CHECK(closed);
+
+    close(fd);
+    if (failures) {
+        fprintf(stderr, "test_client[biginput]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[biginput]: server closed an oversized request\n");
     return 0;
 }
 
@@ -863,5 +904,6 @@ int main(int argc, char **argv) {
     if (strcmp(phase, "burst") == 0) return run_burst(port, host);
     if (strcmp(phase, "write") == 0) return run_write(port, host);
     if (strcmp(phase, "verify") == 0) return run_verify(port, host);
+    if (strcmp(phase, "biginput") == 0) return run_biginput(port, host);
     return run_full(port, host);
 }

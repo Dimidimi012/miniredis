@@ -17,6 +17,7 @@ run_phase() {
 
     "$CLIENT" "$PORT" 127.0.0.1 full
     "$CLIENT" "$PORT" 127.0.0.1 burst
+    "$CLIENT" "$PORT" 127.0.0.1 biginput
 
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
