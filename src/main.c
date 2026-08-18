@@ -14,6 +14,10 @@ static void usage(const char *prog) {
             "  --port N     listen port (default: 6379)\n"
             "  --bind HOST  bind address (default: 127.0.0.1; use 0.0.0.0 for all)\n"
             "  --io MODE    event loop: epoll (Linux, default) or select\n"
+            "  --aof FILE   append-only log: every write command is recorded\n"
+            "               and replayed on startup (crash recovery)\n"
+            "  --rdb FILE   RDB snapshot: saved on clean shutdown and by\n"
+            "               SAVE/BGSAVE; loaded on startup\n"
             "  -h, --help   show this help and exit\n",
             prog);
 }
@@ -38,6 +42,10 @@ int main(int argc, char **argv) {
             host = argv[++i];
         } else if (!strcmp(argv[i], "--io") && i + 1 < argc) {
             io_mode = argv[++i];
+        } else if (!strcmp(argv[i], "--aof") && i + 1 < argc) {
+            g_aof_path = argv[++i];
+        } else if (!strcmp(argv[i], "--rdb") && i + 1 < argc) {
+            g_rdb_path = argv[++i];
         } else {
             usage(argv[0]);
             return 1;

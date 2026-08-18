@@ -4,6 +4,11 @@ miniredis
 *.a
 *.so
 
+# persistence data files
+*.aof
+*.rdb
+*.rdb.tmp
+
 # compiled test binaries
 tests/test_util
 tests/test_dict

@@ -46,6 +46,7 @@ test-unit: tests/test_util tests/test_dict tests/test_resp tests/test_skiplist
 
 test-integration: $(BIN) tests/test_client
 	sh ./tests/integration.sh
+	sh ./tests/integration_persist.sh
 
 test: test-unit test-integration
 

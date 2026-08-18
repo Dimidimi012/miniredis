@@ -1,7 +1,9 @@
 #include "db.h"
 
+#include "aof.h"
 #include "list.h"
 #include "object.h"
+#include "rdb.h"
 #include "server.h"
 #include "util.h"
 #include "zskiplist.h"
@@ -12,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 struct db {
     dict *d;
@@ -453,6 +457,43 @@ static void cmd_quit(db *store, client *c, command *cmd) {
     (void)cmd;
     reply_simple(c, "OK");
     c->closing = 1;
+}
+
+static void cmd_save(db *store, client *c, command *cmd) {
+    if (cmd->argc != 1) {
+        reply_error(c, "wrong number of arguments for 'save' command");
+        return;
+    }
+    if (!g_rdb_path) {
+        reply_error(c, "SAVE requires --rdb FILE at startup");
+        return;
+    }
+    if (rdb_save(g_rdb_path, store) < 0) {
+        reply_error(c, "could not save RDB snapshot");
+        return;
+    }
+    reply_simple(c, "OK");
+}
+
+static void cmd_bgsave(db *store, client *c, command *cmd) {
+    if (cmd->argc != 1) {
+        reply_error(c, "wrong number of arguments for 'bgsave' command");
+        return;
+    }
+    if (!g_rdb_path) {
+        reply_error(c, "BGSAVE requires --rdb FILE at startup");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        reply_error(c, "fork failed: could not start background save");
+        return;
+    }
+    if (pid == 0) {
+        /* Child: write the snapshot from the fork-time (CoW) copy, then exit. */
+        _exit(rdb_save(g_rdb_path, store) == 0 ? 0 : 1);
+    }
+    reply_simple(c, "Background saving started");
 }
 
 /* ---- list commands ---- */
@@ -1770,82 +1811,85 @@ static void cmd_zcount(db *store, client *c, command *cmd) {
 
 typedef struct {
     const char *name;
+    int is_write;   /* logged to the AOF (mutates the dataset) */
     void (*fn)(db *, client *, command *);
 } cmd_entry;
 
 static const cmd_entry commands[] = {
-    {"ping",        cmd_ping},
-    {"echo",        cmd_echo},
-    {"select",      cmd_select},
-    {"quit",        cmd_quit},
+    {"ping",        0, cmd_ping},
+    {"echo",        0, cmd_echo},
+    {"select",      0, cmd_select},
+    {"quit",        0, cmd_quit},
 
-    {"set",         cmd_set},
-    {"get",         cmd_get},
-    {"del",         cmd_del},
-    {"exists",      cmd_exists},
-    {"incr",        cmd_incr},
-    {"decr",        cmd_decr},
-    {"expire",      cmd_expire},
-    {"pexpire",     cmd_pexpire},
-    {"ttl",         cmd_ttl},
-    {"pttl",        cmd_pttl},
-    {"type",        cmd_type},
+    {"set",         1, cmd_set},
+    {"get",         0, cmd_get},
+    {"del",         1, cmd_del},
+    {"exists",      0, cmd_exists},
+    {"incr",        1, cmd_incr},
+    {"decr",        1, cmd_decr},
+    {"expire",      1, cmd_expire},
+    {"pexpire",     1, cmd_pexpire},
+    {"ttl",         0, cmd_ttl},
+    {"pttl",        0, cmd_pttl},
+    {"type",        0, cmd_type},
 
-    {"lpush",       cmd_lpush},
-    {"rpush",       cmd_rpush},
-    {"lpushx",      cmd_lpushx},
-    {"rpushx",      cmd_rpushx},
-    {"lpop",        cmd_lpop},
-    {"rpop",        cmd_rpop},
-    {"llen",        cmd_llen},
-    {"lrange",      cmd_lrange},
-    {"lindex",      cmd_lindex},
-    {"lset",        cmd_lset},
-    {"ltrim",       cmd_ltrim},
-    {"lrem",        cmd_lrem},
-    {"linsert",     cmd_linsert},
+    {"lpush",       1, cmd_lpush},
+    {"rpush",       1, cmd_rpush},
+    {"lpushx",      1, cmd_lpushx},
+    {"rpushx",      1, cmd_rpushx},
+    {"lpop",        1, cmd_lpop},
+    {"rpop",        1, cmd_rpop},
+    {"llen",        0, cmd_llen},
+    {"lrange",      0, cmd_lrange},
+    {"lindex",      0, cmd_lindex},
+    {"lset",        1, cmd_lset},
+    {"ltrim",       1, cmd_ltrim},
+    {"lrem",        1, cmd_lrem},
+    {"linsert",     1, cmd_linsert},
 
-    {"hset",        cmd_hset},
-    {"hmset",       cmd_hmset},
-    {"hget",        cmd_hget},
-    {"hmget",       cmd_hmget},
-    {"hgetall",     cmd_hgetall},
-    {"hkeys",       cmd_hkeys},
-    {"hvals",       cmd_hvals},
-    {"hlen",        cmd_hlen},
-    {"hexists",     cmd_hexists},
-    {"hdel",        cmd_hdel},
-    {"hsetnx",      cmd_hsetnx},
-    {"hincrby",     cmd_hincrby},
-    {"hincrbyfloat", cmd_hincrbyfloat},
+    {"hset",        1, cmd_hset},
+    {"hmset",       1, cmd_hmset},
+    {"hget",        0, cmd_hget},
+    {"hmget",       0, cmd_hmget},
+    {"hgetall",     0, cmd_hgetall},
+    {"hkeys",       0, cmd_hkeys},
+    {"hvals",       0, cmd_hvals},
+    {"hlen",        0, cmd_hlen},
+    {"hexists",     0, cmd_hexists},
+    {"hdel",        1, cmd_hdel},
+    {"hsetnx",      1, cmd_hsetnx},
+    {"hincrby",     1, cmd_hincrby},
+    {"hincrbyfloat", 1, cmd_hincrbyfloat},
 
-    {"sadd",        cmd_sadd},
-    {"srem",        cmd_srem},
-    {"sismember",   cmd_sismember},
-    {"scard",       cmd_scard},
-    {"smembers",    cmd_smembers},
-    {"spop",        cmd_spop},
-    {"sinter",      cmd_sinter},
-    {"sunion",      cmd_sunion},
-    {"sdiff",       cmd_sdiff},
+    {"sadd",        1, cmd_sadd},
+    {"srem",        1, cmd_srem},
+    {"sismember",   0, cmd_sismember},
+    {"scard",       0, cmd_scard},
+    {"smembers",    0, cmd_smembers},
+    {"spop",        1, cmd_spop},
+    {"sinter",      0, cmd_sinter},
+    {"sunion",      0, cmd_sunion},
+    {"sdiff",       0, cmd_sdiff},
 
-    {"zadd",        cmd_zadd},
-    {"zcard",       cmd_zcard},
-    {"zscore",      cmd_zscore},
-    {"zrem",        cmd_zrem},
-    {"zrange",      cmd_zrange},
-    {"zrevrange",   cmd_zrevrange},
-    {"zrangebyscore", cmd_zrangebyscore},
-    {"zrank",       cmd_zrank},
-    {"zrevrank",    cmd_zrevrank},
-    {"zincrby",     cmd_zincrby},
-    {"zcount",      cmd_zcount},
+    {"zadd",        1, cmd_zadd},
+    {"zcard",       0, cmd_zcard},
+    {"zscore",      0, cmd_zscore},
+    {"zrem",        1, cmd_zrem},
+    {"zrange",      0, cmd_zrange},
+    {"zrevrange",   0, cmd_zrevrange},
+    {"zrangebyscore", 0, cmd_zrangebyscore},
+    {"zrank",       0, cmd_zrank},
+    {"zrevrank",    0, cmd_zrevrank},
+    {"zincrby",     1, cmd_zincrby},
+    {"zcount",      0, cmd_zcount},
 
-    {"keys",        cmd_keys},
-    {"flushall",    cmd_flushall},
-    {"dbsize",      cmd_dbsize},
-    {"info",        cmd_info},
-    {"command",     cmd_command},
+    {"keys",        0, cmd_keys},
+    {"flushall",    1, cmd_flushall},
+    {"dbsize",      0, cmd_dbsize},
+    {"info",        0, cmd_info},
+    {"command",     0, cmd_command},
+    {"save",        0, cmd_save},
+    {"bgsave",      0, cmd_bgsave},
 };
 
 void dispatch_command(db *store, client *c, command *cmd) {
@@ -1854,6 +1898,14 @@ void dispatch_command(db *store, client *c, command *cmd) {
     const char *name = cmd->argv[0];
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
         if (!strcasecmp(commands[i].name, name)) {
+            /* Log mutating commands to the AOF before executing them, so that a
+             * replay reproduces the exact same outcome (conditional commands
+             * like SET NX or LPUSHX are re-evaluated identically). */
+            if (commands[i].is_write && g_aof_fd >= 0 && !g_aof_replaying) {
+                if (aof_append_command(g_aof_fd, cmd) < 0) {
+                    log_error("aof: append failed");
+                }
+            }
             commands[i].fn(store, c, cmd);
             return;
         }

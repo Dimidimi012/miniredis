@@ -8,6 +8,9 @@
 
 struct client;   /* full definition in server.h */
 
+struct db {
+    dict *d;      /* key -> robj* */
+};
 typedef struct db db;
 
 db *db_create(void);

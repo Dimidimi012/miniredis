@@ -1,6 +1,8 @@
 #include "server.h"
 
+#include "aof.h"
 #include "db.h"
+#include "rdb.h"
 #include "util.h"
 
 #include <arpa/inet.h>
@@ -26,6 +28,11 @@
 #define EPOLL_MAX_EVENTS  1024
 
 int64_t g_server_start_ms = 0;
+
+const char *g_aof_path = NULL;
+const char *g_rdb_path = NULL;
+int g_aof_fd = -1;
+int g_aof_replaying = 0;
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -430,6 +437,7 @@ int server_run(const char *host, int port, const char *io_mode) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGCHLD, SIG_IGN);   /* reap BGSAVE children automatically */
 
     g_server_start_ms = now_ms();
 
@@ -438,6 +446,27 @@ int server_run(const char *host, int port, const char *io_mode) {
     if (listen_fd < 0) {
         db_free(store);
         return 1;
+    }
+
+    /* ---- persistence setup: AOF first, then load RDB, then replay AOF ---- */
+    if (g_aof_path) {
+        g_aof_fd = aof_open(g_aof_path);
+        if (g_aof_fd < 0) {
+            close(listen_fd);
+            db_free(store);
+            return 1;
+        }
+        log_info("aof: logging to %s", g_aof_path);
+    }
+    if (g_rdb_path && access(g_rdb_path, F_OK) == 0) {
+        if (rdb_load(g_rdb_path, store) < 0) {
+            log_error("rdb: failed to load %s; starting with an empty store", g_rdb_path);
+        }
+    }
+    if (g_aof_path && access(g_aof_path, F_OK) == 0) {
+        if (aof_replay(g_aof_path, store) < 0) {
+            log_error("aof: replay of %s had errors", g_aof_path);
+        }
     }
 
     log_info("miniredis listening on %s:%d (%s event loop)",
@@ -457,6 +486,14 @@ int server_run(const char *host, int port, const char *io_mode) {
     }
 
     log_info("shutting down");
+
+    /* Persist on clean shutdown (SIGINT/SIGTERM); kill -9 skips this and relies
+     * on AOF replay for recovery. */
+    if (g_rdb_path && rdb_save(g_rdb_path, store) < 0) {
+        log_error("rdb: save to %s failed", g_rdb_path);
+    }
+    if (g_aof_fd >= 0) aof_close(g_aof_fd);
+
     close(listen_fd);
     db_free(store);
     return rc;

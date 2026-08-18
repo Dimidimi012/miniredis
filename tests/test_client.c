@@ -240,6 +240,139 @@ static int run_burst(int port, const char *host) {
     return 0;
 }
 
+/* Seed a deterministic dataset; used by the persistence tests. */
+static int run_write(int port, const char *host) {
+    conn = connect_retry(port, host);
+    CHECK(conn >= 0);
+    if (conn < 0) return 1;
+
+    {
+        const char *a[] = {"SET", "pkey", "pval"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"RPUSH", "plist", "a", "b", "c"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"HSET", "ph", "f1", "v1"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"SADD", "ps", "m1", "m2"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"ZADD", "pz", "1", "pa", "2", "pb"};
+        send_cmd(6, a);
+        CHECK(read_integer() == 2);
+    }
+    for (int i = 0; i < 3; i++) {
+        const char *a[] = {"INCR", "pcnt"};
+        send_cmd(2, a);
+        CHECK(read_integer() == i + 1);
+    }
+    {
+        const char *a[] = {"SET", "ptmp", "x"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"DEL", "ptmp"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"SET", "pexp", "v", "EX", "10000"};
+        send_cmd(5, a);
+        expect_simple("+OK");
+    }
+
+    close(conn);
+    if (failures) {
+        fprintf(stderr, "test_client[write]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[write]: done\n");
+    return 0;
+}
+
+/* Verify the dataset seeded by run_write survived a restart. */
+static int run_verify(int port, const char *host) {
+    conn = connect_retry(port, host);
+    CHECK(conn >= 0);
+    if (conn < 0) return 1;
+
+    {
+        const char *a[] = {"GET", "pkey"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "pval") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"LRANGE", "plist", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "b", "c"};
+        expect_array(exp, 3);
+    }
+    {
+        const char *a[] = {"HGET", "ph", "f1"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "v1") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"SISMEMBER", "ps", "m1"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"ZSCORE", "pz", "pb"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "2") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"GET", "pcnt"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "3") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"GET", "ptmp"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got == NULL);   /* the DEL was replayed too */
+        free(got);
+    }
+    {
+        const char *a[] = {"TTL", "pexp"};
+        send_cmd(2, a);
+        long long t = read_integer();
+        CHECK(t > 0 && t <= 10000);
+    }
+
+    close(conn);
+    if (failures) {
+        fprintf(stderr, "test_client[verify]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[verify]: all tests passed\n");
+    return 0;
+}
+
 static int run_full(int port, const char *host) {
     conn = connect_retry(port, host);
     CHECK(conn >= 0);
@@ -728,5 +861,7 @@ int main(int argc, char **argv) {
     const char *phase = (argc > 3) ? argv[3] : "full";
 
     if (strcmp(phase, "burst") == 0) return run_burst(port, host);
+    if (strcmp(phase, "write") == 0) return run_write(port, host);
+    if (strcmp(phase, "verify") == 0) return run_verify(port, host);
     return run_full(port, host);
 }

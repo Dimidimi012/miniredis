@@ -19,6 +19,12 @@ typedef struct client {
 /* Set once at startup; used by INFO to report uptime. */
 extern int64_t g_server_start_ms;
 
+/* ---- persistence configuration (set from main / server_run) ---- */
+extern const char *g_aof_path;   /* NULL when AOF is disabled */
+extern const char *g_rdb_path;   /* NULL when RDB is disabled */
+extern int g_aof_fd;             /* open AOF fd, or -1 */
+extern int g_aof_replaying;      /* suppress AOF logging while replaying */
+
 void client_init(client *c, int fd);
 void client_free(client *c);
 
