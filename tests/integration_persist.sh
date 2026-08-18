@@ -40,4 +40,16 @@ start_server --rdb "$DIR/r.rdb"
 "$CLIENT" "$PORT" 127.0.0.1 verify
 stop_server TERM
 
+# ---- test 3: AOF rewrite -> crash -> recover from the compacted AOF ----
+# The write issued right after BGREWRITEAOF must survive via the rewrite
+# buffer, even though it never hit the pre-rewrite AOF.
+start_server --aof "$DIR/rw.aof"
+"$CLIENT" "$PORT" 127.0.0.1 write
+"$CLIENT" "$PORT" 127.0.0.1 rewrite
+stop_server KILL
+
+start_server --aof "$DIR/rw.aof"
+"$CLIENT" "$PORT" 127.0.0.1 verifyrw
+stop_server TERM
+
 echo "integration_persist: all tests passed"

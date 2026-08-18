@@ -48,12 +48,12 @@ OK
 | 连接 | `PING` `ECHO` `QUIT` `SELECT` |
 | 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `MGET` `MSET` `SETNX` `SETEX` `GETSET` `APPEND` `STRLEN` `GETRANGE` `SETRANGE` `RENAME` `INCR` `DECR` |
 | 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
-| 过期 | `EXPIRE` `PEXPIRE` `TTL` `PTTL` |
+| 过期 | `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT` `TTL` `PTTL` |
 | 列表 | `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE` `LINDEX` `LSET` `LTRIM` `LREM` `LINSERT` |
 | 哈希 | `HSET` `HMSET` `HGET` `HMGET` `HGETALL` `HKEYS` `HVALS` `HLEN` `HEXISTS` `HDEL` `HSETNX` `HINCRBY` `HINCRBYFLOAT` |
 | 集合 | `SADD` `SREM` `SISMEMBER` `SCARD` `SMEMBERS` `SPOP` `SINTER` `SUNION` `SDIFF` |
 | 有序集合 | `ZADD`（含 `NX/XX/CH/INCR`）`ZCARD` `ZSCORE` `ZREM` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE`（含 `WITHSCORES`/`LIMIT`）`ZRANK` `ZREVRANK` `ZINCRBY` `ZCOUNT` |
-| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` |
+| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` `REWRITEAOF` `BGREWRITEAOF` |
 
 未实现的命令会返回标准错误：`-ERR unknown command '...'`。
 
@@ -104,6 +104,10 @@ redis-cli -p 6379 BGSAVE    # fork 子进程异步写快照（CoW 一致视图�
   `fsync` 一次，关停时再 `fsync`）；重启时逐条重放，能恢复 `kill -9` 这类未优雅退出后的
   数据。相对过期时间（`EXPIRE`/`SET EX`）在重放时相对重启时刻重新计算（与无重写的 Redis
   行为一致）。
+- **AOF 重写**：`REWRITEAOF`（同步）/ `BGREWRITEAOF`（fork 子进程）把当前状态序列化为
+  紧凑命令流（按类型批量 `SET/RPUSH/HSET/SADD/ZADD` + `PEXPIREAT`），写入临时文件后原子
+  `rename` 替换原 AOF——日志不再无限增长。重写期间的新写入会进入内存缓冲，子进程换文件后
+  由父进程（SIGCHLD 回收时）重开 fd 并补写，一条不丢。
 - **RDB**：自定义二进制快照格式（格式见 `src/rdb.h`），全部多字节整数大端序，
   保存到 `<path>.tmp` 后原子 `rename`，绝无半写文件。`BGSAVE` 通过 `fork()` 获得
   一致视图，父进程不阻塞。
@@ -195,8 +199,9 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 - [x] `epoll` 事件循环（Linux 默认）+ `select` 跨平台回退
 - [x] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [x] 持久化：AOF 追加日志 + RDB 快照（SAVE/BGSAVE/崩溃恢复）
+- [x] AOF 重写（REWRITEAOF / BGREWRITEAOF，重写期间写入不丢失）
 - [x] 抗哈希洪水攻击：SipHash-2-4 + `/dev/urandom` 真随机种子
-- [ ] AOF 重写（BGREWRITEAOF）与 `appendfsync always` 策略
+- [ ] `appendfsync always` 策略
 - [ ] `kqueue` 事件循环（macOS/BSD）
 - [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
 - [ ] 主从复制、`MONITOR`、`PUB/SUB`

@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/epoll.h>
@@ -36,10 +37,31 @@ int g_aof_fd = -1;
 int g_aof_replaying = 0;
 
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_sigchld = 0;
 
 static void on_signal(int sig) {
     (void)sig;
     g_stop = 1;
+}
+
+static void on_sigchld(int sig) {
+    (void)sig;
+    g_sigchld = 1;
+}
+
+/* Reap finished fork children (BGSAVE / BGREWRITEAOF). If a background AOF
+ * rewrite just completed, its child swapped in a fresh AOF file, so our fd is
+ * now pointing at the unlinked old file: reopen and flush the rewrite buffer. */
+static void reap_children(void) {
+    if (!g_sigchld) return;
+    g_sigchld = 0;
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        /* reap all children */
+    }
+    if (g_aof_rewriting) {
+        g_aof_rewriting = 0;
+        if (aof_reopen() < 0) log_error("aof: reopen after rewrite failed");
+    }
 }
 
 /* ---- client lifecycle ---- */
@@ -378,6 +400,7 @@ static int run_loop_epoll(db *store, int listen_fd) {
 
         compact_clients(&clients, &nclients, ep_fd);
         aof_periodic();
+        reap_children();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
@@ -445,6 +468,7 @@ static int run_loop_select(db *store, int listen_fd) {
 
         compact_clients(&clients, &nclients, -1);
         aof_periodic();
+        reap_children();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
@@ -458,7 +482,7 @@ int server_run(const char *host, int port, const char *io_mode) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    signal(SIGCHLD, SIG_IGN);   /* reap BGSAVE children automatically */
+    signal(SIGCHLD, on_sigchld);   /* reap BGSAVE/BGREWRITEAOF children */
 
     g_server_start_ms = now_ms();
 

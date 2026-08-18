@@ -547,6 +547,32 @@ static void cmd_expire_generic(db *store, client *c, command *cmd, int is_ms) {
 static void cmd_expire(db *store, client *c, command *cmd) { cmd_expire_generic(store, c, cmd, 0); }
 static void cmd_pexpire(db *store, client *c, command *cmd) { cmd_expire_generic(store, c, cmd, 1); }
 
+static void cmd_expireat_generic(db *store, client *c, command *cmd, int is_ms) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for '%s' command", cmd->argv[0]);
+        return;
+    }
+    long long ts;
+    if (!string_to_ll(cmd->argv[2], &ts) || ts < 0) {
+        reply_error(c, "invalid expire time in '%s' command", cmd->argv[0]);
+        return;
+    }
+    if (!is_ms && ts > INT64_MAX / 1000) {
+        reply_error(c, "invalid expire time in '%s' command", cmd->argv[0]);
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (!o) {
+        reply_integer(c, 0);
+        return;
+    }
+    o->expire_at = is_ms ? ts : ts * 1000;
+    reply_integer(c, 1);
+}
+
+static void cmd_expireat(db *store, client *c, command *cmd) { cmd_expireat_generic(store, c, cmd, 0); }
+static void cmd_pexpireat(db *store, client *c, command *cmd) { cmd_expireat_generic(store, c, cmd, 1); }
+
 static void cmd_ttl_generic(db *store, client *c, command *cmd, int is_ms) {
     if (cmd->argc != 2) {
         reply_error(c, "wrong number of arguments for '%s' command", cmd->argv[0]);
@@ -704,6 +730,49 @@ static void cmd_bgsave(db *store, client *c, command *cmd) {
         _exit(rdb_save(g_rdb_path, store) == 0 ? 0 : 1);
     }
     reply_simple(c, "Background saving started");
+}
+
+static void cmd_rewriteaof(db *store, client *c, command *cmd) {
+    if (cmd->argc != 1) {
+        reply_error(c, "wrong number of arguments for 'rewriteaof' command");
+        return;
+    }
+    if (!g_aof_path) {
+        reply_error(c, "REWRITEAOF requires --aof FILE at startup");
+        return;
+    }
+    if (aof_rewrite(g_aof_path, store) < 0) {
+        reply_error(c, "could not rewrite AOF");
+        return;
+    }
+    if (aof_reopen() < 0) {
+        reply_error(c, "could not reopen AOF after rewrite");
+        return;
+    }
+    reply_simple(c, "OK");
+}
+
+static void cmd_bgrewriteaof(db *store, client *c, command *cmd) {
+    if (cmd->argc != 1) {
+        reply_error(c, "wrong number of arguments for 'bgrewriteaof' command");
+        return;
+    }
+    if (!g_aof_path) {
+        reply_error(c, "BGREWRITEAOF requires --aof FILE at startup");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        reply_error(c, "fork failed: could not start background rewrite");
+        return;
+    }
+    if (pid == 0) {
+        /* Child: serialize the fork-time state into a fresh AOF, then exit.
+         * The parent reopens the new file when it reaps us (SIGCHLD). */
+        _exit(aof_rewrite(g_aof_path, store) == 0 ? 0 : 1);
+    }
+    g_aof_rewriting = 1;
+    reply_simple(c, "Background append only file rewriting started");
 }
 
 /* ---- list commands ---- */
@@ -2049,6 +2118,8 @@ static const cmd_entry commands[] = {
     {"getset",      1, cmd_getset},
     {"expire",      1, cmd_expire},
     {"pexpire",     1, cmd_pexpire},
+    {"expireat",    1, cmd_expireat},
+    {"pexpireat",   1, cmd_pexpireat},
     {"ttl",         0, cmd_ttl},
     {"pttl",        0, cmd_pttl},
     {"type",        0, cmd_type},
@@ -2110,6 +2181,8 @@ static const cmd_entry commands[] = {
     {"command",     0, cmd_command},
     {"save",        0, cmd_save},
     {"bgsave",      0, cmd_bgsave},
+    {"rewriteaof",  0, cmd_rewriteaof},
+    {"bgrewriteaof", 0, cmd_bgrewriteaof},
 };
 
 void dispatch_command(db *store, client *c, command *cmd) {
