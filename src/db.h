@@ -4,8 +4,6 @@
 #include <stddef.h>
 
 #include "dict.h"
-#include "list.h"
-#include "pubsub.h"
 #include "resp.h"
 
 struct client;   /* full definition in server.h */
@@ -13,8 +11,6 @@ struct client;   /* full definition in server.h */
 struct db {
     dict *d;              /* key -> robj* */
     size_t expire_cursor; /* bucket cursor for the periodic expire cycle */
-    pubsub *ps;           /* pub/sub channel registry */
-    list *monitors;       /* clients in MONITOR mode */
 };
 typedef struct db db;
 
@@ -26,10 +22,6 @@ size_t db_size(const db *db);
  * ~10x/sec from the event loop) and delete expired keys so they do not linger
  * in memory until accessed. */
 void db_expire_cycle(db *db);
-
-/* Cleanup hook called when a client disconnects: removes it from every pubsub
- * channel and from the monitor list. */
-void db_client_disconnect(db *store, struct client *c);
 
 void dispatch_command(db *store, struct client *c, command *cmd);
 

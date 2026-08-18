@@ -385,6 +385,47 @@ static int run_verify(int port, const char *host, int check_prw) {
     return 0;
 }
 
+/* Active expiration: a short-TTL key must disappear on its own (via the
+ * periodic expire cycle) without any access triggering lazy deletion. DBSIZE
+ * counts raw dict entries, so it observes the cycle directly. */
+static int run_expire(int port, const char *host) {
+    conn = connect_retry(port, host);
+    CHECK(conn >= 0);
+    if (conn < 0) return 1;
+
+    long long base = 0;
+    {
+        const char *a[] = {"DBSIZE"};
+        send_cmd(1, a);
+        base = read_integer();
+    }
+    {
+        const char *a[] = {"SET", "tk", "v", "EX", "1"};
+        send_cmd(5, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"DBSIZE"};
+        send_cmd(1, a);
+        CHECK(read_integer() == base + 1);
+    }
+    /* wait past the 1s TTL plus a couple of expire-cycle ticks, no access */
+    usleep(2500 * 1000);
+    {
+        const char *a[] = {"DBSIZE"};
+        send_cmd(1, a);
+        CHECK(read_integer() == base);
+    }
+
+    close(conn);
+    if (failures) {
+        fprintf(stderr, "test_client[expire]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[expire]: active expiration removed the expired key\n");
+    return 0;
+}
+
 /* Exercise REWRITEAOF / BGREWRITEAOF plus a write issued while the background
  * rewrite may still be running. That write must survive via the rewrite buffer
  * and the subsequent crash (verified by the verifyrw phase). */
@@ -1124,5 +1165,6 @@ int main(int argc, char **argv) {
     if (strcmp(phase, "verifyrw") == 0) return run_verify(port, host, 1);
     if (strcmp(phase, "rewrite") == 0) return run_rewrite(port, host);
     if (strcmp(phase, "biginput") == 0) return run_biginput(port, host);
+    if (strcmp(phase, "expire") == 0) return run_expire(port, host);
     return run_full(port, host);
 }

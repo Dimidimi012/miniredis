@@ -37,7 +37,9 @@ OK
 - **持久化**：AOF 追加日志（每条写命令落盘，**appendfsync everysec** 定时刷盘、重启重放）
   + RDB 快照（原子写入、`SAVE`/`BGSAVE`、优雅关停自动保存、启动自动加载）。
 - **内存防护**：客户端查询输入缓冲 64MB 上限，超限断开连接，防止慢/恶意客户端耗尽内存。
-- **过期机制**：`EXPIRE`/`PEXPIRE`/`SET ... EX/PX`，惰性删除（读时判断）+ 精确到毫秒。
+- **过期机制**：`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`/`SET ... EX/PX`；
+  **惰性删除 + 主动过期**（事件循环 10Hz 周期采样扫描并删除过期键，不依赖访问触发），
+  精确到毫秒。
 - **工程完整**：Makefile + CMake、单元测试 + 端到端测试、`-Wall -Wextra -Wpedantic`、
   README + 架构说明。
 
@@ -184,8 +186,8 @@ make test              # 全部
 
 实现了两套可切换的事件循环：**epoll**（Linux 默认）与 **select**（跨平台回退），
 通过 `--io select|epoll` 切换，方便直接对比基准。`select` 受 `FD_SETSIZE`（默认 1024）
-限制；epoll 可支撑数万并发连接。单线程串行处理命令，`redis-benchmark` 下 SET/GET
-通常可达数万 ~ 十几万 QPS（视机器而定）。
+限制；epoll 可支撑数万并发连接。单线程串行处理命令，事件循环以 10Hz 心跳驱动主动过期
+与 AOF 刷盘；`redis-benchmark` 下 SET/GET 通常可达数万 ~ 十几万 QPS（视机器而定）。
 
 ```bash
 ./miniredis --io select &   # 分别压测两套循环
@@ -201,9 +203,10 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 - [x] 持久化：AOF 追加日志 + RDB 快照（SAVE/BGSAVE/崩溃恢复）
 - [x] AOF 重写（REWRITEAOF / BGREWRITEAOF，重写期间写入不丢失）
 - [x] 抗哈希洪水攻击：SipHash-2-4 + `/dev/urandom` 真随机种子
+- [x] 定期过期清理（事件循环 10Hz 主动扫描，替代纯惰性删除）
 - [ ] `appendfsync always` 策略
 - [ ] `kqueue` 事件循环（macOS/BSD）
-- [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
+- [ ] 主动内存回收（内存压力下的 LRU 逐出）
 - [ ] 主从复制、`MONITOR`、`PUB/SUB`
 
 ---

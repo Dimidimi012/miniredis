@@ -356,8 +356,8 @@ static int run_loop_epoll(db *store, int listen_fd) {
     struct epoll_event events[EPOLL_MAX_EVENTS];
 
     while (!g_stop) {
-        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
-        int timeout = (g_aof_fd >= 0) ? 1000 : -1;
+        /* 100ms poll: drives the periodic expire cycle (10Hz) and AOF fsync. */
+        int timeout = 100;
         int n = epoll_wait(ep_fd, events, EPOLL_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -399,6 +399,7 @@ static int run_loop_epoll(db *store, int listen_fd) {
         }
 
         compact_clients(&clients, &nclients, ep_fd);
+        db_expire_cycle(store);
         aof_periodic();
         reap_children();
     }
@@ -431,15 +432,10 @@ static int run_loop_select(db *store, int listen_fd) {
             if (c->fd > maxfd) maxfd = c->fd;
         }
 
-        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
-        struct timeval tv, *ptv = NULL;
-        if (g_aof_fd >= 0) {
-            tv.tv_sec = 1;
-            tv.tv_usec = 0;
-            ptv = &tv;
-        }
+        /* 100ms poll: drives the periodic expire cycle (10Hz) and AOF fsync. */
+        struct timeval tv = {0, 100000};
 
-        int rc = select(maxfd + 1, &rset, &wset, NULL, ptv);
+        int rc = select(maxfd + 1, &rset, &wset, NULL, &tv);
         if (rc < 0) {
             if (errno == EINTR) continue;
             log_error("select: %s", strerror(errno));
@@ -467,6 +463,7 @@ static int run_loop_select(db *store, int listen_fd) {
         }
 
         compact_clients(&clients, &nclients, -1);
+        db_expire_cycle(store);
         aof_periodic();
         reap_children();
     }
