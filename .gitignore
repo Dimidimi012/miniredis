@@ -1,8 +1,13 @@
 # build artifacts
 miniredis
 *.o
+*.obj
 *.a
 *.so
+*.pdb
+
+# editor config
+.vscode/
 
 # persistence data files
 *.aof
