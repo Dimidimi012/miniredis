@@ -305,7 +305,7 @@ static int run_write(int port, const char *host) {
 }
 
 /* Verify the dataset seeded by run_write survived a restart. */
-static int run_verify(int port, const char *host) {
+static int run_verify(int port, const char *host, int check_prw) {
     conn = connect_retry(port, host);
     CHECK(conn >= 0);
     if (conn < 0) return 1;
@@ -366,6 +366,15 @@ static int run_verify(int port, const char *host) {
         long long t = read_integer();
         CHECK(t > 0 && t <= 10000);
     }
+    if (check_prw) {
+        /* only present after an AOF-rewrite round trip (verifyrw phase) */
+        const char *a[] = {"GET", "prw"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "rwv") == 0);
+        free(got);
+    }
 
     close(conn);
     if (failures) {
@@ -373,6 +382,41 @@ static int run_verify(int port, const char *host) {
         return 1;
     }
     printf("test_client[verify]: all tests passed\n");
+    return 0;
+}
+
+/* Exercise REWRITEAOF / BGREWRITEAOF plus a write issued while the background
+ * rewrite may still be running. That write must survive via the rewrite buffer
+ * and the subsequent crash (verified by the verifyrw phase). */
+static int run_rewrite(int port, const char *host) {
+    conn = connect_retry(port, host);
+    CHECK(conn >= 0);
+    if (conn < 0) return 1;
+
+    {
+        const char *a[] = {"REWRITEAOF"};
+        send_cmd(1, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"BGREWRITEAOF"};
+        send_cmd(1, a);
+        expect_simple("+Background append only file rewriting started");
+    }
+    {
+        const char *a[] = {"SET", "prw", "rwv"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    /* give the child time to swap in the new file and the parent to reopen it */
+    usleep(500 * 1000);
+
+    close(conn);
+    if (failures) {
+        fprintf(stderr, "test_client[rewrite]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[rewrite]: done\n");
     return 0;
 }
 
@@ -1076,7 +1120,9 @@ int main(int argc, char **argv) {
 
     if (strcmp(phase, "burst") == 0) return run_burst(port, host);
     if (strcmp(phase, "write") == 0) return run_write(port, host);
-    if (strcmp(phase, "verify") == 0) return run_verify(port, host);
+    if (strcmp(phase, "verify") == 0) return run_verify(port, host, 0);
+    if (strcmp(phase, "verifyrw") == 0) return run_verify(port, host, 1);
+    if (strcmp(phase, "rewrite") == 0) return run_rewrite(port, host);
     if (strcmp(phase, "biginput") == 0) return run_biginput(port, host);
     return run_full(port, host);
 }
