@@ -58,7 +58,9 @@ static robj *lookup_key(db *store, const char *key, size_t klen) {
 /* ---- shared helpers ---- */
 
 static void reply_wrongtype(client *c) {
-    reply_error(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    /* Redis uses "WRONGTYPE" as the error code itself (no "-ERR " prefix). */
+    dynbuf_append_cstr(&c->out,
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
 }
 
 /* Delete the key when its container type became empty (Redis semantics). */

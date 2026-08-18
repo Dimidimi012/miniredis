@@ -253,7 +253,7 @@ static int run_write(int port, const char *host) {
     }
     {
         const char *a[] = {"RPUSH", "plist", "a", "b", "c"};
-        send_cmd(4, a);
+        send_cmd(5, a);
         CHECK(read_integer() == 3);
     }
     {
@@ -477,7 +477,7 @@ static int run_full(int port, const char *host) {
     /* ---- LIST ---- */
     {
         const char *a[] = {"RPUSH", "mylist", "a", "b", "c"};
-        send_cmd(4, a);
+        send_cmd(5, a);
         CHECK(read_integer() == 3);
     }
     {
@@ -559,7 +559,7 @@ static int run_full(int port, const char *host) {
     /* ---- HASH ---- */
     {
         const char *a[] = {"HSET", "h", "f1", "v1", "f2", "v2"};
-        send_cmd(5, a);
+        send_cmd(6, a);
         CHECK(read_integer() == 2);
     }
     {
@@ -623,7 +623,7 @@ static int run_full(int port, const char *host) {
     /* ---- SET ---- */
     {
         const char *a[] = {"SADD", "s", "a", "b", "c"};
-        send_cmd(4, a);
+        send_cmd(5, a);
         CHECK(read_integer() == 3);
     }
     {
