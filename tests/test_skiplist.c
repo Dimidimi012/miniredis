@@ -1,6 +1,7 @@
 #include "util.h"
 #include "zskiplist.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,8 +111,8 @@ int main(void) {
         CHECK(l == NULL);
 
         /* -inf / +inf */
-        f = zsl_first_in_score_range(zsl, -1.0 / 0.0, 0);
-        l = zsl_last_in_score_range(zsl, 1.0 / 0.0, 0);
+        f = zsl_first_in_score_range(zsl, -INFINITY, 0);
+        l = zsl_last_in_score_range(zsl, INFINITY, 0);
         CHECK(f != NULL && f->score == 0.0);
         CHECK(l != NULL && l->score == 10.0);
         zsl_free(zsl);
@@ -150,7 +151,7 @@ int main(void) {
 
         /* For each member, its rank must be consistent with the element at
          * that rank, and scores must be non-decreasing by rank. */
-        double prev = -1.0 / 0.0;
+        double prev = -INFINITY;
         for (unsigned long r = 1; r <= N; r++) {
             zskiplist_node *n = zsl_get_element_by_rank(zs->zsl, r);
             CHECK(n != NULL);

@@ -10,16 +10,13 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-struct db {
-    dict *d;
-};
 
 static void free_obj(void *p) {
     robj_free((robj *)p);
@@ -1103,7 +1100,7 @@ static void cmd_hincrbyfloat(db *store, client *c, command *cmd) {
         return;
     }
     double nv = cur + delta;
-    if (nv != nv || nv == 1.0 / 0.0 || nv == -1.0 / 0.0) {
+    if (nv != nv || nv == INFINITY || nv == -INFINITY) {
         reply_error(c, "increment would produce NaN or Infinity");
         return;
     }

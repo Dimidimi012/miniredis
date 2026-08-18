@@ -209,6 +209,7 @@ unsigned long zsl_get_rank(const zskiplist *zsl, double score,
 }
 
 zskiplist_node *zsl_get_element_by_rank(const zskiplist *zsl, unsigned long rank) {
+    if (rank == 0) return NULL;   /* ranks are 1-based */
     zskiplist_node *x = zsl->header;
     unsigned long traversed = 0;
 
@@ -243,7 +244,8 @@ zskiplist_node *zsl_last_in_score_range(const zskiplist *zsl, double max, int ma
             x = x->level[i].forward;
         }
     }
-    return x;
+    /* x stays at the header when no node satisfies the upper bound. */
+    return x == zsl->header ? NULL : x;
 }
 
 /* ---- zset ---- */
