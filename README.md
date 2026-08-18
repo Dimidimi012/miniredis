@@ -37,11 +37,7 @@ OK
 - **持久化**：AOF 追加日志（每条写命令落盘，**appendfsync everysec** 定时刷盘、重启重放）
   + RDB 快照（原子写入、`SAVE`/`BGSAVE`、优雅关停自动保存、启动自动加载）。
 - **内存防护**：客户端查询输入缓冲 64MB 上限，超限断开连接，防止慢/恶意客户端耗尽内存。
-- **消息与监控**：`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE`（订阅模式协议、多订阅者推送、
-  断线自动退订）+ `MONITOR`（命令监控流）。
-- **过期机制**：`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`/`SET ... EX/PX`；
-  **惰性删除 + 主动过期**（事件循环 10Hz 周期采样扫描并删除过期键，不依赖访问触发），
-  精确到毫秒。
+- **过期机制**：`EXPIRE`/`PEXPIRE`/`SET ... EX/PX`，惰性删除（读时判断）+ 精确到毫秒。
 - **工程完整**：Makefile + CMake、单元测试 + 端到端测试、`-Wall -Wextra -Wpedantic`、
   README + 架构说明。
 
@@ -49,15 +45,15 @@ OK
 
 | 类别 | 命令 |
 |---|---|
-| 连接 | `PING` `ECHO` `QUIT` `SELECT` `SUBSCRIBE` `UNSUBSCRIBE` `PUBLISH` |
-| 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `MGET` `MSET` `SETNX` `SETEX` `GETSET` `APPEND` `STRLEN` `GETRANGE` `SETRANGE` `RENAME` `INCR` `DECR` |
+| 连接 | `PING` `ECHO` `QUIT` `SELECT` |
+| 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `INCR` `DECR` |
 | 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
-| 过期 | `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT` `TTL` `PTTL` |
+| 过期 | `EXPIRE` `PEXPIRE` `TTL` `PTTL` |
 | 列表 | `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE` `LINDEX` `LSET` `LTRIM` `LREM` `LINSERT` |
 | 哈希 | `HSET` `HMSET` `HGET` `HMGET` `HGETALL` `HKEYS` `HVALS` `HLEN` `HEXISTS` `HDEL` `HSETNX` `HINCRBY` `HINCRBYFLOAT` |
 | 集合 | `SADD` `SREM` `SISMEMBER` `SCARD` `SMEMBERS` `SPOP` `SINTER` `SUNION` `SDIFF` |
 | 有序集合 | `ZADD`（含 `NX/XX/CH/INCR`）`ZCARD` `ZSCORE` `ZREM` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE`（含 `WITHSCORES`/`LIMIT`）`ZRANK` `ZREVRANK` `ZINCRBY` `ZCOUNT` |
-| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` `REWRITEAOF` `BGREWRITEAOF` `MONITOR` |
+| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` |
 
 未实现的命令会返回标准错误：`-ERR unknown command '...'`。
 
@@ -108,10 +104,6 @@ redis-cli -p 6379 BGSAVE    # fork 子进程异步写快照（CoW 一致视图�
   `fsync` 一次，关停时再 `fsync`）；重启时逐条重放，能恢复 `kill -9` 这类未优雅退出后的
   数据。相对过期时间（`EXPIRE`/`SET EX`）在重放时相对重启时刻重新计算（与无重写的 Redis
   行为一致）。
-- **AOF 重写**：`REWRITEAOF`（同步）/ `BGREWRITEAOF`（fork 子进程）把当前状态序列化为
-  紧凑命令流（按类型批量 `SET/RPUSH/HSET/SADD/ZADD` + `PEXPIREAT`），写入临时文件后原子
-  `rename` 替换原 AOF——日志不再无限增长。重写期间的新写入会进入内存缓冲，子进程换文件后
-  由父进程（SIGCHLD 回收时）重开 fd 并补写，一条不丢。
 - **RDB**：自定义二进制快照格式（格式见 `src/rdb.h`），全部多字节整数大端序，
   保存到 `<path>.tmp` 后原子 `rename`，绝无半写文件。`BGSAVE` 通过 `fork()` 获得
   一致视图，父进程不阻塞。
@@ -178,9 +170,8 @@ make test-integration  # 启动服务器 + test_client 端到端断言
 make test              # 全部
 ```
 
-测试覆盖：整数解析边界、glob 匹配、**SipHash 已知向量**、哈希表增删改查/二进制键/扩容/
-迭代、RESP 完整与残缺帧、一条完整的 `PING/SET/GET/INCR/EXPIRE/TTL/KEYS/未知命令` 链路、
-并发 `burst` 压力、**超大请求断连（biginput，>64MB）**、以及 AOF/RDB 两条持久化恢复链路。
+测试覆盖：整数解析边界、glob 匹配、哈希表增删改查/二进制键/扩容/迭代、RESP 完整与
+残缺帧、以及一条完整的 `PING/SET/GET/INCR/EXPIRE/TTL/KEYS/未知命令` 链路。
 
 ---
 
@@ -188,8 +179,8 @@ make test              # 全部
 
 实现了两套可切换的事件循环：**epoll**（Linux 默认）与 **select**（跨平台回退），
 通过 `--io select|epoll` 切换，方便直接对比基准。`select` 受 `FD_SETSIZE`（默认 1024）
-限制；epoll 可支撑数万并发连接。单线程串行处理命令，事件循环以 10Hz 心跳驱动主动过期
-与 AOF 刷盘；`redis-benchmark` 下 SET/GET 通常可达数万 ~ 十几万 QPS（视机器而定）。
+限制；epoll 可支撑数万并发连接。单线程串行处理命令，`redis-benchmark` 下 SET/GET
+通常可达数万 ~ 十几万 QPS（视机器而定）。
 
 ```bash
 ./miniredis --io select &   # 分别压测两套循环
@@ -203,15 +194,11 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 - [x] `epoll` 事件循环（Linux 默认）+ `select` 跨平台回退
 - [x] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [x] 持久化：AOF 追加日志 + RDB 快照（SAVE/BGSAVE/崩溃恢复）
-- [x] AOF 重写（REWRITEAOF / BGREWRITEAOF，重写期间写入不丢失）
 - [x] 抗哈希洪水攻击：SipHash-2-4 + `/dev/urandom` 真随机种子
-- [x] 定期过期清理（事件循环 10Hz 主动扫描，替代纯惰性删除）
-- [x] `MONITOR` 命令监控流、`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE` 发布订阅
-- [ ] `PSUBSCRIBE`/`PUNSUBSCRIBE`（频道模式订阅）
-- [ ] `appendfsync always` 策略
+- [ ] AOF 重写（BGREWRITEAOF）与 `appendfsync always` 策略
 - [ ] `kqueue` 事件循环（macOS/BSD）
-- [ ] 主动内存回收（内存压力下的 LRU 逐出）
-- [ ] 主从复制、`SCRIPT`、`EVAL`（Lua）
+- [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
+- [ ] 主从复制、`MONITOR`、`PUB/SUB`
 
 ---
 

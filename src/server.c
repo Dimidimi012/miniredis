@@ -18,7 +18,6 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/epoll.h>
@@ -37,31 +36,10 @@ int g_aof_fd = -1;
 int g_aof_replaying = 0;
 
 static volatile sig_atomic_t g_stop = 0;
-static volatile sig_atomic_t g_sigchld = 0;
 
 static void on_signal(int sig) {
     (void)sig;
     g_stop = 1;
-}
-
-static void on_sigchld(int sig) {
-    (void)sig;
-    g_sigchld = 1;
-}
-
-/* Reap finished fork children (BGSAVE / BGREWRITEAOF). If a background AOF
- * rewrite just completed, its child swapped in a fresh AOF file, so our fd is
- * now pointing at the unlinked old file: reopen and flush the rewrite buffer. */
-static void reap_children(void) {
-    if (!g_sigchld) return;
-    g_sigchld = 0;
-    while (waitpid(-1, NULL, WNOHANG) > 0) {
-        /* reap all children */
-    }
-    if (g_aof_rewriting) {
-        g_aof_rewriting = 0;
-        if (aof_reopen() < 0) log_error("aof: reopen after rewrite failed");
-    }
 }
 
 /* ---- client lifecycle ---- */
@@ -73,9 +51,6 @@ void client_init(client *c, int fd) {
     c->out_sent = 0;
     c->closing = 0;
     c->events = 0;
-    c->subscribed = 0;
-    c->monitoring = 0;
-    c->peer[0] = '\0';
 }
 
 void client_free(client *c) {
@@ -215,18 +190,6 @@ static void accept_clients(int listen_fd, int ep_fd,
 
         client *c = xmalloc(sizeof(*c));
         client_init(c, fd);
-        /* record the peer address for MONITOR output */
-        {
-            struct sockaddr_in peer;
-            socklen_t plen = sizeof(peer);
-            if (getpeername(fd, (struct sockaddr *)&peer, &plen) == 0) {
-                char ip[64];
-                if (inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip))) {
-                    snprintf(c->peer, sizeof(c->peer), "%s:%d",
-                             ip, (int)ntohs(peer.sin_port));
-                }
-            }
-        }
         (*clients)[(*n)++] = c;
 
 #ifdef __linux__
@@ -315,7 +278,7 @@ static int write_client(client *c) {
     return 0;
 }
 
-static void compact_clients(client ***clients, size_t *n, int ep_fd, db *store) {
+static void compact_clients(client ***clients, size_t *n, int ep_fd) {
     (void)ep_fd;   /* only meaningful on Linux with the epoll loop */
     size_t w = 0;
     for (size_t i = 0; i < *n; i++) {
@@ -324,9 +287,6 @@ static void compact_clients(client ***clients, size_t *n, int ep_fd, db *store) 
 #ifdef __linux__
             if (ep_fd >= 0) epoll_ctl(ep_fd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
-            /* drop the client from pubsub channels / monitor list so their
-             * pointers never dangle (a later PUBLISH would touch freed memory) */
-            db_client_disconnect(store, c);
             client_free(c);
         } else {
             (*clients)[w++] = c;
@@ -374,8 +334,8 @@ static int run_loop_epoll(db *store, int listen_fd) {
     struct epoll_event events[EPOLL_MAX_EVENTS];
 
     while (!g_stop) {
-        /* 100ms poll: drives the periodic expire cycle (10Hz) and AOF fsync. */
-        int timeout = 100;
+        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
+        int timeout = (g_aof_fd >= 0) ? 1000 : -1;
         int n = epoll_wait(ep_fd, events, EPOLL_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -416,10 +376,8 @@ static int run_loop_epoll(db *store, int listen_fd) {
             }
         }
 
-        compact_clients(&clients, &nclients, ep_fd, store);
-        db_expire_cycle(store);
+        compact_clients(&clients, &nclients, ep_fd);
         aof_periodic();
-        reap_children();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
@@ -450,10 +408,15 @@ static int run_loop_select(db *store, int listen_fd) {
             if (c->fd > maxfd) maxfd = c->fd;
         }
 
-        /* 100ms poll: drives the periodic expire cycle (10Hz) and AOF fsync. */
-        struct timeval tv = {0, 100000};
+        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
+        struct timeval tv, *ptv = NULL;
+        if (g_aof_fd >= 0) {
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            ptv = &tv;
+        }
 
-        int rc = select(maxfd + 1, &rset, &wset, NULL, &tv);
+        int rc = select(maxfd + 1, &rset, &wset, NULL, ptv);
         if (rc < 0) {
             if (errno == EINTR) continue;
             log_error("select: %s", strerror(errno));
@@ -480,10 +443,8 @@ static int run_loop_select(db *store, int listen_fd) {
             }
         }
 
-        compact_clients(&clients, &nclients, -1, store);
-        db_expire_cycle(store);
+        compact_clients(&clients, &nclients, -1);
         aof_periodic();
-        reap_children();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
@@ -497,7 +458,7 @@ int server_run(const char *host, int port, const char *io_mode) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    signal(SIGCHLD, on_sigchld);   /* reap BGSAVE/BGREWRITEAOF children */
+    signal(SIGCHLD, SIG_IGN);   /* reap BGSAVE children automatically */
 
     g_server_start_ms = now_ms();
 

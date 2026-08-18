@@ -31,17 +31,4 @@ int aof_replay(const char *path, db *store);
  * disabled. */
 void aof_periodic(void);
 
-/* Rewrite the AOF as a compact command stream representing the current state.
- * Writes to "<path>.rewrite.tmp" and atomically renames it over the file.
- * Returns 0 on success, -1 on error. */
-int aof_rewrite(const char *path, const db *store);
-
-/* Close the current AOF fd and reopen the file (used after a rewrite), then
- * flush any commands buffered during the rewrite. Returns 0/-1. */
-int aof_reopen(void);
-
-/* Set while a background rewrite child is in flight; aof_append_command then
- * mirrors writes into an in-memory buffer so they survive the file swap. */
-extern int g_aof_rewriting;
-
 #endif /* MINIREDIS_AOF_H */
