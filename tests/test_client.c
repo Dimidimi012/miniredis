@@ -861,6 +861,179 @@ static int run_full(int port, const char *host) {
         CHECK(read_integer() == 1);
     }
 
+    /* ---- extended string commands ---- */
+    {
+        const char *a[] = {"SETNX", "nk", "v"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"SETNX", "nk", "v2"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 0);
+    }
+    {
+        const char *a[] = {"MSET", "a", "1", "b", "2"};
+        send_cmd(5, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"MGET", "a", "b", "nope"};
+        send_cmd(4, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 3);
+        if (n == 3) {
+            CHECK(got[0] && strcmp(got[0], "1") == 0);
+            CHECK(got[1] && strcmp(got[1], "2") == 0);
+            CHECK(got[2] == NULL);   /* missing -> null bulk */
+        }
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"APPEND", "str", "hello"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 5);
+    }
+    {
+        const char *a[] = {"APPEND", "str", " world"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 11);
+    }
+    {
+        const char *a[] = {"GET", "str"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "hello world") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"STRLEN", "str"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 11);
+    }
+    {
+        const char *a[] = {"GETRANGE", "str", "0", "4"};
+        send_cmd(4, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "hello") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"GETRANGE", "str", "-5", "-1"};
+        send_cmd(4, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "world") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"SETRANGE", "str", "6", "C"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 11);
+    }
+    {
+        const char *a[] = {"GET", "str"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "hello Cworld") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"SETEX", "sk", "100", "v"};
+        send_cmd(4, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"TTL", "sk"};
+        send_cmd(2, a);
+        long long t = read_integer();
+        CHECK(t > 0 && t <= 100);
+    }
+    {
+        const char *a[] = {"GETSET", "gs", "new"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got == NULL);   /* first GETSET on a missing key -> nil */
+        free(got);
+    }
+    {
+        const char *a[] = {"GETSET", "gs", "new2"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "new") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"GET", "gs"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "new2") == 0);
+        free(got);
+    }
+    /* RENAME */
+    {
+        const char *a[] = {"SET", "rn1", "v"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"SET", "rn2", "old"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"RENAME", "rn1", "rn2"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"GET", "rn2"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "v") == 0);   /* destination was overwritten */
+        free(got);
+    }
+    {
+        const char *a[] = {"GET", "rn1"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got == NULL);   /* source is gone */
+        free(got);
+    }
+    {
+        const char *a[] = {"RENAME", "nosuch", "x"};
+        send_cmd(3, a);
+        char *line = read_line(conn);
+        CHECK(line != NULL);
+        if (line) CHECK(strncmp(line, "-ERR", 4) == 0);
+    }
+    /* WRONGTYPE on the new commands */
+    {
+        const char *a[] = {"RPUSH", "wtl", "x"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"APPEND", "wtl", "y"};
+        send_cmd(3, a);
+        char *line = read_line(conn);
+        CHECK(line != NULL);
+        if (line) CHECK(strncmp(line, "-WRONGTYPE", 10) == 0);
+    }
+    /* cleanup */
+    {
+        const char *a[] = {"DEL", "nk", "a", "b", "str", "sk", "gs", "rn2", "wtl"};
+        send_cmd(9, a);
+        CHECK(read_integer() == 8);
+    }
+
     /* KEYS (only "counter" remains) */
     {
         const char *a[] = {"KEYS", "*"};

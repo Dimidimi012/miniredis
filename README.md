@@ -46,7 +46,7 @@ OK
 | 类别 | 命令 |
 |---|---|
 | 连接 | `PING` `ECHO` `QUIT` `SELECT` |
-| 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `INCR` `DECR` |
+| 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `MGET` `MSET` `SETNX` `SETEX` `GETSET` `APPEND` `STRLEN` `GETRANGE` `SETRANGE` `RENAME` `INCR` `DECR` |
 | 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
 | 过期 | `EXPIRE` `PEXPIRE` `TTL` `PTTL` |
 | 列表 | `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE` `LINDEX` `LSET` `LTRIM` `LREM` `LINSERT` |
