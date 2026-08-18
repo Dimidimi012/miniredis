@@ -1,7 +1,9 @@
 CC       ?= cc
 CFLAGS   ?= -O2 -g
 CFLAGS   += -std=c11 -Wall -Wextra -Wpedantic
-CPPFLAGS += -Isrc
+# -std=c11 enables strict ANSI mode, which hides POSIX declarations (clock_gettime,
+# strcasecmp, sockets, ...). These feature-test macros explicitly re-enable them.
+CPPFLAGS += -Isrc -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
 LDFLAGS  ?=
 LDLIBS   ?=
 

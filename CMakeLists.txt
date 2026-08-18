@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(miniredis C)
 
+# -std=c11 hides POSIX declarations; re-enable them explicitly.
+add_definitions(-D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
