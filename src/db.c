@@ -243,6 +243,217 @@ static void cmd_get(db *store, client *c, command *cmd) {
     reply_bulk(c, o->ptr, o->len);
 }
 
+static void cmd_mget(db *store, client *c, command *cmd) {
+    if (cmd->argc < 2) {
+        reply_error(c, "wrong number of arguments for 'mget' command");
+        return;
+    }
+    reply_array_header(c, (size_t)(cmd->argc - 1));
+    for (int i = 1; i < cmd->argc; i++) {
+        robj *o = lookup_key(store, cmd->argv[i], strlen(cmd->argv[i]));
+        /* missing or wrong type -> nil (Redis semantics) */
+        if (o && o->type == OBJ_STRING) reply_bulk(c, o->ptr, o->len);
+        else reply_null(c);
+    }
+}
+
+static void cmd_mset(db *store, client *c, command *cmd) {
+    if (cmd->argc < 3 || ((cmd->argc - 1) & 1)) {
+        reply_error(c, "wrong number of arguments for 'mset' command");
+        return;
+    }
+    for (int i = 1; i + 1 < cmd->argc; i += 2) {
+        robj *val = robj_new_string(cmd->argv[i + 1], strlen(cmd->argv[i + 1]));
+        robj *old = dict_set(store->d, cmd->argv[i], strlen(cmd->argv[i]), val);
+        robj_free(old);
+    }
+    reply_simple(c, "OK");
+}
+
+static void cmd_append(db *store, client *c, command *cmd) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for 'append' command");
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o && o->type != OBJ_STRING) {
+        reply_wrongtype(c);
+        return;
+    }
+    const char *val = cmd->argv[2];
+    size_t vlen = strlen(val);
+
+    if (!o) {
+        o = robj_new_string(val, vlen);
+        dict_set(store->d, cmd->argv[1], strlen(cmd->argv[1]), o);
+    } else {
+        size_t oldlen = o->len;
+        o->ptr = xrealloc(o->ptr, oldlen + vlen + 1);
+        memcpy((char *)o->ptr + oldlen, val, vlen);
+        o->len = oldlen + vlen;
+        ((char *)o->ptr)[o->len] = '\0';
+        /* TTL is preserved (o->expire_at untouched) */
+    }
+    reply_integer(c, (long long)o->len);
+}
+
+static void cmd_strlen(db *store, client *c, command *cmd) {
+    if (cmd->argc != 2) {
+        reply_error(c, "wrong number of arguments for 'strlen' command");
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o && o->type != OBJ_STRING) {
+        reply_wrongtype(c);
+        return;
+    }
+    reply_integer(c, o ? (long long)o->len : 0);
+}
+
+static void cmd_getrange(db *store, client *c, command *cmd) {
+    if (cmd->argc != 4) {
+        reply_error(c, "wrong number of arguments for 'getrange' command");
+        return;
+    }
+    long long start, end;
+    if (!string_to_ll(cmd->argv[2], &start) || !string_to_ll(cmd->argv[3], &end)) {
+        reply_error(c, "value is not an integer or out of range");
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o && o->type != OBJ_STRING) {
+        reply_wrongtype(c);
+        return;
+    }
+    if (!o) {
+        reply_bulk_cstr(c, "");
+        return;
+    }
+
+    long long len = (long long)o->len;
+    if (start < 0) start = len + start;
+    if (end < 0) end = len + end;
+    if (start < 0) start = 0;
+    if (end >= len) end = len - 1;
+    if (start > end || start >= len) {
+        reply_bulk_cstr(c, "");
+        return;
+    }
+    reply_bulk(c, (char *)o->ptr + start, (size_t)(end - start + 1));
+}
+
+static void cmd_setrange(db *store, client *c, command *cmd) {
+    if (cmd->argc != 4) {
+        reply_error(c, "wrong number of arguments for 'setrange' command");
+        return;
+    }
+    long long offset;
+    if (!string_to_ll(cmd->argv[2], &offset) || offset < 0) {
+        reply_error(c, "offset is out of range");
+        return;
+    }
+    const char *val = cmd->argv[3];
+    size_t vlen = strlen(val);
+
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o && o->type != OBJ_STRING) {
+        reply_wrongtype(c);
+        return;
+    }
+    if (!o) {
+        o = robj_new_string("", 0);
+        dict_set(store->d, cmd->argv[1], strlen(cmd->argv[1]), o);
+    }
+
+    size_t need = (size_t)offset + vlen;
+    if (need > o->len) {
+        /* grow, padding the gap with zero bytes (Redis semantics) */
+        char *nb = xmalloc(need + 1);
+        memcpy(nb, o->ptr, o->len);
+        memset(nb + o->len, 0, need - o->len);
+        free(o->ptr);
+        o->ptr = nb;
+        o->len = need;
+        ((char *)o->ptr)[need] = '\0';
+    }
+    memcpy((char *)o->ptr + offset, val, vlen);
+    reply_integer(c, (long long)o->len);
+}
+
+static void cmd_rename(db *store, client *c, command *cmd) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for 'rename' command");
+        return;
+    }
+    const char *src = cmd->argv[1];
+    const char *dst = cmd->argv[2];
+    size_t slen = strlen(src), dlen = strlen(dst);
+
+    if (slen == dlen && memcmp(src, dst, slen) == 0) {
+        reply_error(c, "source and destination objects are the same");
+        return;
+    }
+
+    robj *o = lookup_key(store, src, slen);
+    if (!o) {
+        reply_error(c, "no such key");
+        return;
+    }
+    robj *moved = dict_delete(store->d, src, slen);
+    robj *old = dict_set(store->d, dst, dlen, moved);
+    robj_free(old);
+    reply_simple(c, "OK");
+}
+
+static void cmd_setnx(db *store, client *c, command *cmd) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for 'setnx' command");
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o) {
+        reply_integer(c, 0);
+        return;
+    }
+    robj *val = robj_new_string(cmd->argv[2], strlen(cmd->argv[2]));
+    dict_set(store->d, cmd->argv[1], strlen(cmd->argv[1]), val);
+    reply_integer(c, 1);
+}
+
+static void cmd_setex(db *store, client *c, command *cmd) {
+    if (cmd->argc != 4) {
+        reply_error(c, "wrong number of arguments for 'setex' command");
+        return;
+    }
+    long long secs;
+    if (!string_to_ll(cmd->argv[2], &secs) || secs <= 0 || secs > INT64_MAX / 1000) {
+        reply_error(c, "invalid expire time in 'setex' command");
+        return;
+    }
+    robj *val = robj_new_string(cmd->argv[3], strlen(cmd->argv[3]));
+    val->expire_at = now_ms() + secs * 1000;
+    robj *old = dict_set(store->d, cmd->argv[1], strlen(cmd->argv[1]), val);
+    robj_free(old);
+    reply_simple(c, "OK");
+}
+
+static void cmd_getset(db *store, client *c, command *cmd) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for 'getset' command");
+        return;
+    }
+    robj *o = lookup_key(store, cmd->argv[1], strlen(cmd->argv[1]));
+    if (o && o->type != OBJ_STRING) {
+        reply_wrongtype(c);
+        return;
+    }
+    robj *val = robj_new_string(cmd->argv[2], strlen(cmd->argv[2]));
+    robj *old = dict_set(store->d, cmd->argv[1], strlen(cmd->argv[1]), val);
+    if (old) reply_bulk(c, old->ptr, old->len);
+    else reply_null(c);
+    robj_free(old);
+}
+
 static void cmd_del(db *store, client *c, command *cmd) {
     if (cmd->argc < 2) {
         reply_error(c, "wrong number of arguments for 'del' command");
@@ -1826,6 +2037,16 @@ static const cmd_entry commands[] = {
     {"exists",      0, cmd_exists},
     {"incr",        1, cmd_incr},
     {"decr",        1, cmd_decr},
+    {"mget",        0, cmd_mget},
+    {"mset",        1, cmd_mset},
+    {"append",      1, cmd_append},
+    {"strlen",      0, cmd_strlen},
+    {"getrange",    0, cmd_getrange},
+    {"setrange",    1, cmd_setrange},
+    {"rename",      1, cmd_rename},
+    {"setnx",       1, cmd_setnx},
+    {"setex",       1, cmd_setex},
+    {"getset",      1, cmd_getset},
     {"expire",      1, cmd_expire},
     {"pexpire",     1, cmd_pexpire},
     {"ttl",         0, cmd_ttl},
