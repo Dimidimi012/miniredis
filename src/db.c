@@ -25,6 +25,7 @@ static void free_obj(void *p) {
 db *db_create(void) {
     db *s = xmalloc(sizeof(*s));
     s->d = dict_create();
+    s->expire_cursor = 0;
     return s;
 }
 
@@ -53,6 +54,33 @@ static robj *lookup_key(db *store, const char *key, size_t klen) {
         return NULL;
     }
     return o;
+}
+
+#define EXPIRE_CYCLE_MAX_KEYS 200   /* bounded work per cycle */
+
+void db_expire_cycle(db *store) {
+    dict *d = store->d;
+    if (d->size == 0) {
+        store->expire_cursor = 0;
+        return;
+    }
+    if (store->expire_cursor >= d->size) store->expire_cursor = 0;
+
+    size_t examined = 0;
+    while (examined < EXPIRE_CYCLE_MAX_KEYS && store->expire_cursor < d->size) {
+        size_t b = store->expire_cursor++;
+        for (dict_entry *e = d->table[b]; e; ) {
+            dict_entry *next = e->next;
+            robj *o = (robj *)e->val;
+            examined++;
+            if (key_expired(o)) {
+                robj *dead = dict_delete(d, e->key, e->klen);
+                robj_free(dead);
+            }
+            e = next;
+        }
+    }
+    if (store->expire_cursor >= d->size) store->expire_cursor = 0;
 }
 
 /* ---- shared helpers ---- */
