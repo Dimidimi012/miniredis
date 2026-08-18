@@ -516,6 +516,7 @@ static void list_pop(db *store, client *c, command *cmd, int head) {
     if (count == 1) {
         robj *v = head ? list_pop_head(l) : list_pop_tail(l);
         if (!v) {
+            maybe_delete_key(store, cmd->argv[1], o);
             reply_null(c);
             return;
         }
