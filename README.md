@@ -29,13 +29,11 @@ OK
 
 - **RESP 协议**：完整解析客户端请求（数组 / 批量字符串 / 简单字符串），正确处理
   TCP 粘包/半包（增量解析，等待完整帧后再执行）。
-- **非阻塞 I/O 事件循环**：基于 `select()` 的单线程事件循环，同时管理多个客户端，
-  支持非阻塞读写与优雅关闭。
-- **手写哈希表**：链地址法 + 2 的幂桶大小 + 0.75 负载因子扩容 + 每实例随机种子，
-  键值均**二进制安全**（显式长度，可存任意字节）。
+- **双事件循环**：Linux 下默认 `epoll`（`--io select|epoll` 可切换），select 为跨平台回退。
+- **手写数据结构**：哈希表（链地址法 + 0.75 扩容 + 随机种子）、双向链表、
+  **带 span 的跳表**（ZSET，支持 O(log n) 排名查询）；键值均**二进制安全**。
+- **5 种数据类型**：STRING / LIST / HASH / SET / ZSET（全部支持过期）。
 - **过期机制**：`EXPIRE`/`PEXPIRE`/`SET ... EX/PX`，惰性删除（读时判断）+ 精确到毫秒。
-- **命令丰富**：字符串、自增自减（含溢出检查）、TTL、KEYS（支持 glob：`*` `?` `[...]`）、
-  TYPE、INFO 等。
 - **工程完整**：Makefile + CMake、单元测试 + 端到端测试、`-Wall -Wextra -Wpedantic`、
   README + 架构说明。
 
@@ -47,6 +45,10 @@ OK
 | 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `INCR` `DECR` |
 | 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
 | 过期 | `EXPIRE` `PEXPIRE` `TTL` `PTTL` |
+| 列表 | `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE` `LINDEX` `LSET` `LTRIM` `LREM` `LINSERT` |
+| 哈希 | `HSET` `HMSET` `HGET` `HMGET` `HGETALL` `HKEYS` `HVALS` `HLEN` `HEXISTS` `HDEL` `HSETNX` `HINCRBY` `HINCRBYFLOAT` |
+| 集合 | `SADD` `SREM` `SISMEMBER` `SCARD` `SMEMBERS` `SPOP` `SINTER` `SUNION` `SDIFF` |
+| 有序集合 | `ZADD`（含 `NX/XX/CH/INCR`）`ZCARD` `ZSCORE` `ZREM` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE`（含 `WITHSCORES`/`LIMIT`）`ZRANK` `ZREVRANK` `ZINCRBY` `ZCOUNT` |
 | 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` |
 
 未实现的命令会返回标准错误：`-ERR unknown command '...'`。
@@ -161,9 +163,9 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 ## Roadmap（后续迭代方向）
 
 - [x] `epoll` 事件循环（Linux 默认）+ `select` 跨平台回退
+- [x] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [ ] `kqueue` 事件循环（macOS/BSD）
 - [ ] 持久化：AOF 追加日志 + RDB 快照、崩溃恢复
-- [ ] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
 - [ ] 抗哈希洪水攻击：SipHash + `getrandom()` 真随机种子
 - [ ] 主从复制、`MONITOR`、`PUB/SUB`

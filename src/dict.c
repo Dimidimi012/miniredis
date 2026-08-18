@@ -161,3 +161,26 @@ dict_entry *dict_iter_next(dict_iter *it) {
     }
     return NULL;
 }
+
+static void seed_rand_once(void) {
+    static int seeded = 0;
+    if (!seeded) {
+        srand((unsigned)(now_ms() ^ (uintptr_t)&seeded));
+        seeded = 1;
+    }
+}
+
+dict_entry *dict_random_entry(const dict *d) {
+    if (d->used == 0) return NULL;
+    seed_rand_once();
+
+    dict_entry *pick = NULL;
+    unsigned long i = 0;
+    for (size_t b = 0; b < d->size; b++) {
+        for (dict_entry *e = d->table[b]; e; e = e->next) {
+            if (rand() % (i + 1) == 0) pick = e;
+            i++;
+        }
+    }
+    return pick;
+}

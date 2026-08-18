@@ -31,14 +31,18 @@ tests/test_dict: tests/test_dict.c src/dict.c src/dict.h src/util.c src/util.h
 tests/test_resp: tests/test_resp.c src/resp.c src/resp.h src/util.c src/util.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_resp.c src/resp.c src/util.c
 
+tests/test_skiplist: tests/test_skiplist.c src/zskiplist.c src/zskiplist.h src/dict.c src/dict.h src/util.c src/util.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_skiplist.c src/zskiplist.c src/dict.c src/util.c
+
 # End-to-end client used by tests/integration.sh.
 tests/test_client: tests/test_client.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_client.c
 
-test-unit: tests/test_util tests/test_dict tests/test_resp
+test-unit: tests/test_util tests/test_dict tests/test_resp tests/test_skiplist
 	./tests/test_util
 	./tests/test_dict
 	./tests/test_resp
+	./tests/test_skiplist
 
 test-integration: $(BIN) tests/test_client
 	sh ./tests/integration.sh
@@ -46,4 +50,4 @@ test-integration: $(BIN) tests/test_client
 test: test-unit test-integration
 
 clean:
-	rm -f $(BIN) $(OBJ) tests/test_util tests/test_dict tests/test_resp tests/test_client
+	rm -f $(BIN) $(OBJ) tests/test_util tests/test_dict tests/test_resp tests/test_skiplist tests/test_client

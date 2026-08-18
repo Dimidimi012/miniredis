@@ -44,4 +44,8 @@ void *dict_delete(dict *d, const void *key, size_t klen);
 void dict_iter_init(dict_iter *it, const dict *d);
 dict_entry *dict_iter_next(dict_iter *it);
 
+/* Uniformly random entry (reservoir sampling); NULL when the dict is empty.
+ * Used by SPOP. */
+dict_entry *dict_random_entry(const dict *d);
+
 #endif /* MINIREDIS_DICT_H */

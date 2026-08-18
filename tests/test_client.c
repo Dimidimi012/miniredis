@@ -111,6 +111,75 @@ static char *read_bulk(void) {
     return payload;
 }
 
+/* Read an array reply of bulk strings. Returns a malloc'd array of malloc'd
+ * strings (entries may be NULL for null bulk replies); *n gets the count. */
+static char **read_array(int *n) {
+    char *line = read_line(conn);
+    if (!line || line[0] != '*') {
+        failures++;
+        *n = 0;
+        return NULL;
+    }
+    long long cnt = atoll(line + 1);
+    if (cnt < 0) {
+        *n = 0;
+        return NULL;
+    }
+    *n = (int)cnt;
+    char **arr = malloc((size_t)cnt * sizeof(char *));
+    for (long long i = 0; i < cnt; i++) {
+        char *l2 = read_line(conn);
+        if (!l2 || l2[0] != '$') {
+            failures++;
+            arr[i] = NULL;
+            continue;
+        }
+        long long bl = atoll(l2 + 1);
+        if (bl < 0) {
+            arr[i] = NULL;
+            continue;
+        }
+        arr[i] = malloc((size_t)bl + 1);
+        if (read_all(conn, arr[i], (size_t)bl) != 0) {
+            free(arr[i]);
+            arr[i] = NULL;
+            failures++;
+            continue;
+        }
+        arr[i][bl] = '\0';
+        char crlf[2];
+        if (read_all(conn, crlf, 2) != 0 || crlf[0] != '\r' || crlf[1] != '\n') {
+            failures++;
+        }
+    }
+    return arr;
+}
+
+static void free_array(char **arr, int n) {
+    if (!arr) return;
+    for (int i = 0; i < n; i++) free(arr[i]);
+    free(arr);
+}
+
+/* Read an array and compare it (element-wise, in order) with `expected`.
+ * NULL entries in `expected` match null bulk replies. */
+static void expect_array(const char *const *expected, int n) {
+    int got_n = 0;
+    char **got = read_array(&got_n);
+    CHECK(got_n == n);
+    if (got_n == n) {
+        for (int i = 0; i < n; i++) {
+            if (expected[i] == NULL) {
+                CHECK(got[i] == NULL);
+            } else {
+                CHECK(got[i] != NULL);
+                if (got[i]) CHECK(strcmp(got[i], expected[i]) == 0);
+            }
+        }
+    }
+    free_array(got, got_n);
+}
+
 static int connect_retry(int port, const char *host) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -272,6 +341,352 @@ static int run_full(int port, const char *host) {
         send_cmd(2, a);
         CHECK(read_integer() == 0);
     }
+    /* ---- LIST ---- */
+    {
+        const char *a[] = {"RPUSH", "mylist", "a", "b", "c"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"LRANGE", "mylist", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "b", "c"};
+        expect_array(exp, 3);
+    }
+    {
+        const char *a[] = {"LPUSH", "mylist", "z"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 4);
+    }
+    {
+        const char *a[] = {"LPOP", "mylist"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "z") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"LLEN", "mylist"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"LINDEX", "mylist", "1"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "b") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"LINSERT", "mylist", "BEFORE", "b", "X"};
+        send_cmd(5, a);
+        CHECK(read_integer() == 4);
+    }
+    {
+        const char *a[] = {"LRANGE", "mylist", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "X", "b", "c"};
+        expect_array(exp, 4);
+    }
+    {
+        const char *a[] = {"LREM", "mylist", "1", "b"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"LTRIM", "mylist", "0", "1"};
+        send_cmd(4, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"LRANGE", "mylist", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "X"};
+        expect_array(exp, 2);
+    }
+    {
+        const char *a[] = {"LSET", "mylist", "0", "A"};
+        send_cmd(4, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"LRANGE", "mylist", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"A", "X"};
+        expect_array(exp, 2);
+    }
+    {
+        const char *a[] = {"DEL", "mylist"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 1);
+    }
+
+    /* ---- HASH ---- */
+    {
+        const char *a[] = {"HSET", "h", "f1", "v1", "f2", "v2"};
+        send_cmd(5, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"HGET", "h", "f1"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "v1") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"HGETALL", "h"};
+        send_cmd(2, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 4);
+        if (n == 4) {
+            /* pairs come back in hash-bucket order; verify both pairs exist */
+            int found_f1 = 0, found_f2 = 0;
+            for (int i = 0; i + 1 < n; i += 2) {
+                if (got[i] && strcmp(got[i], "f1") == 0)
+                    found_f1 = (got[i + 1] && strcmp(got[i + 1], "v1") == 0);
+                if (got[i] && strcmp(got[i], "f2") == 0)
+                    found_f2 = (got[i + 1] && strcmp(got[i + 1], "v2") == 0);
+            }
+            CHECK(found_f1 && found_f2);
+        }
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"HINCRBY", "h", "n", "5"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 5);
+    }
+    {
+        const char *a[] = {"HINCRBY", "h", "n", "-2"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"HDEL", "h", "f1"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"HLEN", "h"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"HEXISTS", "h", "f2"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"DEL", "h"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 1);
+    }
+
+    /* ---- SET ---- */
+    {
+        const char *a[] = {"SADD", "s", "a", "b", "c"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"SCARD", "s"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"SISMEMBER", "s", "b"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"SREM", "s", "b"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"SMEMBERS", "s"};
+        send_cmd(2, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 2);
+        if (n == 2) {
+            int has_a = 0, has_c = 0;
+            for (int i = 0; i < n; i++) {
+                if (got[i] && strcmp(got[i], "a") == 0) has_a = 1;
+                if (got[i] && strcmp(got[i], "c") == 0) has_c = 1;
+            }
+            CHECK(has_a && has_c);
+        }
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"SADD", "s2", "a", "b"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"SINTER", "s", "s2"};
+        send_cmd(3, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 1);
+        if (n == 1) CHECK(got[0] && strcmp(got[0], "a") == 0);
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"SUNION", "s", "s2"};
+        send_cmd(3, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 3);
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"SDIFF", "s2", "s"};
+        send_cmd(3, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 1);
+        if (n == 1) CHECK(got[0] && strcmp(got[0], "b") == 0);
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"SPOP", "s"};
+        send_cmd(2, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        free(got);
+    }
+    {
+        const char *a[] = {"DEL", "s", "s2"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 2);
+    }
+
+    /* ---- ZSET ---- */
+    {
+        const char *a[] = {"ZADD", "z", "1", "a", "2", "b", "3", "c"};
+        send_cmd(8, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"ZCARD", "z"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 3);
+    }
+    {
+        const char *a[] = {"ZSCORE", "z", "b"};
+        send_cmd(3, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "2") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"ZRANGE", "z", "0", "-1"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "b", "c"};
+        expect_array(exp, 3);
+    }
+    {
+        const char *a[] = {"ZRANGE", "z", "0", "-1", "WITHSCORES"};
+        send_cmd(5, a);
+        int n = 0;
+        char **got = read_array(&n);
+        CHECK(n == 6);
+        if (n == 6) {
+            CHECK(strcmp(got[0], "a") == 0 && strcmp(got[1], "1") == 0);
+            CHECK(strcmp(got[2], "b") == 0 && strcmp(got[3], "2") == 0);
+            CHECK(strcmp(got[4], "c") == 0 && strcmp(got[5], "3") == 0);
+        }
+        free_array(got, n);
+    }
+    {
+        const char *a[] = {"ZREVRANGE", "z", "0", "1"};
+        send_cmd(4, a);
+        const char *exp[] = {"c", "b"};
+        expect_array(exp, 2);
+    }
+    {
+        const char *a[] = {"ZRANK", "z", "c"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"ZREVRANK", "z", "c"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 0);
+    }
+    {
+        const char *a[] = {"ZRANGEBYSCORE", "z", "1", "2"};
+        send_cmd(4, a);
+        const char *exp[] = {"a", "b"};
+        expect_array(exp, 2);
+    }
+    {
+        const char *a[] = {"ZRANGEBYSCORE", "z", "(1", "2"};
+        send_cmd(4, a);
+        const char *exp[] = {"b"};
+        expect_array(exp, 1);
+    }
+    {
+        const char *a[] = {"ZCOUNT", "z", "1", "2"};
+        send_cmd(4, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"ZINCRBY", "z", "5", "a"};
+        send_cmd(4, a);
+        char *got = read_bulk();
+        CHECK(got != NULL);
+        if (got) CHECK(strcmp(got, "6") == 0);
+        free(got);
+    }
+    {
+        const char *a[] = {"ZREM", "z", "a"};
+        send_cmd(3, a);
+        CHECK(read_integer() == 1);
+    }
+    {
+        const char *a[] = {"ZCARD", "z"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 2);
+    }
+    {
+        const char *a[] = {"DEL", "z"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 1);
+    }
+
+    /* ---- WRONGTYPE + TYPE ---- */
+    {
+        const char *a[] = {"SET", "wt", "v"};
+        send_cmd(3, a);
+        expect_simple("+OK");
+    }
+    {
+        const char *a[] = {"LPUSH", "wt", "x"};
+        send_cmd(3, a);
+        char *line = read_line(conn);
+        CHECK(line != NULL);
+        if (line) CHECK(strncmp(line, "-WRONGTYPE", 10) == 0);
+    }
+    {
+        const char *a[] = {"TYPE", "wt"};
+        send_cmd(2, a);
+        expect_simple("+string");
+    }
+    {
+        const char *a[] = {"DEL", "wt"};
+        send_cmd(2, a);
+        CHECK(read_integer() == 1);
+    }
+
     /* KEYS (only "counter" remains) */
     {
         const char *a[] = {"KEYS", "*"};
