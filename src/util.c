@@ -1,10 +1,13 @@
 #include "util.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static void oom(void) {
     fputs("miniredis: out of memory\n", stderr);
@@ -47,6 +50,38 @@ int64_t now_ms(void) {
         return (int64_t)time(NULL) * 1000;
     }
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+}
+
+void util_random_bytes(void *buf, size_t n) {
+    static int fd = -2;   /* lazily opened /dev/urandom */
+    if (fd == -2) {
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    }
+
+    if (fd >= 0) {
+        uint8_t *p = (uint8_t *)buf;
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = read(fd, p + got, n - got);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (r == 0) break;
+            got += (size_t)r;
+        }
+        if (got == n) return;
+    }
+
+    /* Fallback: a non-cryptographic xorshift-ish mixer seeded with whatever
+     * entropy we can scrape. Only used when /dev/urandom is unavailable. */
+    uint64_t s = (uint64_t)now_ms() ^ (uint64_t)(uintptr_t)buf ^
+                 (uint64_t)clock() ^ ((uint64_t)getpid() << 32);
+    uint8_t *p = (uint8_t *)buf;
+    for (size_t i = 0; i < n; i++) {
+        s = s * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        p[i] = (uint8_t)(s >> 33);
+    }
 }
 
 static void vlog(const char *level, const char *fmt, va_list ap) {

@@ -26,6 +26,7 @@
 #define MAX_CLIENTS       1024
 #define READ_CHUNK        65536
 #define EPOLL_MAX_EVENTS  1024
+#define MAX_QUERY_BUF     (64 * 1024 * 1024)   /* client input buffer cap */
 
 int64_t g_server_start_ms = 0;
 
@@ -215,6 +216,14 @@ static int read_client(client *c, db *store) {
         if (n > 0) {
             dynbuf_append(&c->in, buf, (size_t)n);
 
+            /* Bound memory use: drop clients that pile up an unreasonable
+             * amount of unparsed input (a slow/abusive client). */
+            if (c->in.len > MAX_QUERY_BUF) {
+                log_warn("client fd=%d: query buffer exceeded %d bytes, closing",
+                         c->fd, MAX_QUERY_BUF);
+                return -1;
+            }
+
             /* Drain every complete command currently buffered. */
             for (;;) {
                 command cmd;
@@ -325,7 +334,9 @@ static int run_loop_epoll(db *store, int listen_fd) {
     struct epoll_event events[EPOLL_MAX_EVENTS];
 
     while (!g_stop) {
-        int n = epoll_wait(ep_fd, events, EPOLL_MAX_EVENTS, -1);
+        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
+        int timeout = (g_aof_fd >= 0) ? 1000 : -1;
+        int n = epoll_wait(ep_fd, events, EPOLL_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno == EINTR) continue;
             log_error("epoll_wait: %s", strerror(errno));
@@ -366,6 +377,7 @@ static int run_loop_epoll(db *store, int listen_fd) {
         }
 
         compact_clients(&clients, &nclients, ep_fd);
+        aof_periodic();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
@@ -396,7 +408,15 @@ static int run_loop_select(db *store, int listen_fd) {
             if (c->fd > maxfd) maxfd = c->fd;
         }
 
-        int rc = select(maxfd + 1, &rset, &wset, NULL, NULL);
+        /* Poll with a 1s timeout only when AOF is on, to drive aof_periodic(). */
+        struct timeval tv, *ptv = NULL;
+        if (g_aof_fd >= 0) {
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            ptv = &tv;
+        }
+
+        int rc = select(maxfd + 1, &rset, &wset, NULL, ptv);
         if (rc < 0) {
             if (errno == EINTR) continue;
             log_error("select: %s", strerror(errno));
@@ -424,6 +444,7 @@ static int run_loop_select(db *store, int listen_fd) {
         }
 
         compact_clients(&clients, &nclients, -1);
+        aof_periodic();
     }
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);

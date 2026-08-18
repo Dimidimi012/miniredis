@@ -30,11 +30,13 @@ OK
 - **RESP 协议**：完整解析客户端请求（数组 / 批量字符串 / 简单字符串），正确处理
   TCP 粘包/半包（增量解析，等待完整帧后再执行）。
 - **双事件循环**：Linux 下默认 `epoll`（`--io select|epoll` 可切换），select 为跨平台回退。
-- **手写数据结构**：哈希表（链地址法 + 0.75 扩容 + 随机种子）、双向链表、
-  **带 span 的跳表**（ZSET，支持 O(log n) 排名查询）；键值均**二进制安全**。
+- **手写数据结构**：哈希表（链地址法 + 0.75 扩容 + **SipHash-2-4 键控哈希 + /dev/urandom
+  随机种子**，抗哈希洪水攻击）、双向链表、**带 span 的跳表**（ZSET，支持 O(log n) 排名查询）；
+  键值均**二进制安全**。
 - **5 种数据类型**：STRING / LIST / HASH / SET / ZSET（全部支持过期）。
-- **持久化**：AOF 追加日志（每条写命令落盘，重启重放）+ RDB 快照（原子写入、
-  `SAVE`/`BGSAVE`、优雅关停自动保存、启动自动加载）。
+- **持久化**：AOF 追加日志（每条写命令落盘，**appendfsync everysec** 定时刷盘、重启重放）
+  + RDB 快照（原子写入、`SAVE`/`BGSAVE`、优雅关停自动保存、启动自动加载）。
+- **内存防护**：客户端查询输入缓冲 64MB 上限，超限断开连接，防止慢/恶意客户端耗尽内存。
 - **过期机制**：`EXPIRE`/`PEXPIRE`/`SET ... EX/PX`，惰性删除（读时判断）+ 精确到毫秒。
 - **工程完整**：Makefile + CMake、单元测试 + 端到端测试、`-Wall -Wextra -Wpedantic`、
   README + 架构说明。
@@ -98,9 +100,10 @@ redis-cli -p 6379 SAVE      # 同步写快照
 redis-cli -p 6379 BGSAVE    # fork 子进程异步写快照（CoW 一致视图）
 ```
 
-- **AOF**：写命令在执行前以 RESP 形式追加到文件（`fsync` 在关停时执行）；重启时
-  逐条重放，能恢复 `kill -9` 这类未优雅退出后的数据。相对过期时间（`EXPIRE`/
-  `SET EX`）在重放时相对重启时刻重新计算（与无重写的 Redis 行为一致）。
+- **AOF**：写命令在执行前以 RESP 形式追加到文件；`appendfsync everysec`（事件循环每秒
+  `fsync` 一次，关停时再 `fsync`）；重启时逐条重放，能恢复 `kill -9` 这类未优雅退出后的
+  数据。相对过期时间（`EXPIRE`/`SET EX`）在重放时相对重启时刻重新计算（与无重写的 Redis
+  行为一致）。
 - **RDB**：自定义二进制快照格式（格式见 `src/rdb.h`），全部多字节整数大端序，
   保存到 `<path>.tmp` 后原子 `rename`，绝无半写文件。`BGSAVE` 通过 `fork()` 获得
   一致视图，父进程不阻塞。
@@ -191,10 +194,10 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 - [x] `epoll` 事件循环（Linux 默认）+ `select` 跨平台回退
 - [x] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [x] 持久化：AOF 追加日志 + RDB 快照（SAVE/BGSAVE/崩溃恢复）
-- [ ] AOF 重写（BGREWRITEAOF）与 `appendfsync everysec` 策略
+- [x] 抗哈希洪水攻击：SipHash-2-4 + `/dev/urandom` 真随机种子
+- [ ] AOF 重写（BGREWRITEAOF）与 `appendfsync always` 策略
 - [ ] `kqueue` 事件循环（macOS/BSD）
 - [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收
-- [ ] 抗哈希洪水攻击：SipHash + `getrandom()` 真随机种子
 - [ ] 主从复制、`MONITOR`、`PUB/SUB`
 
 ---

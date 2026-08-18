@@ -1,5 +1,6 @@
 #include "dict.h"
 
+#include "siphash.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -9,17 +10,11 @@
 #define LOAD_FACTOR_NUM  3
 #define LOAD_FACTOR_DEN  4   /* grow when used/size >= 0.75 */
 
-/* FNV-1a with a per-dictionary seed. Good speed/quality for a KV store; note
- * that it is not a cryptographic hash, so hardening against hash-flooding is
- * listed as future work. */
-static uint64_t dict_hash(const void *key, size_t len, uint64_t seed) {
-    const unsigned char *p = (const unsigned char *)key;
-    uint64_t h = UINT64_C(14695981039346656037) ^ seed;
-    for (size_t i = 0; i < len; i++) {
-        h ^= p[i];
-        h *= UINT64_C(1099511628211);
-    }
-    return h;
+/* SipHash-2-4 keyed with a per-dictionary random 128-bit key. The key makes
+ * the hash unpredictable to an attacker, so it cannot force worst-case
+ * collisions (hash-flooding resistance). */
+static uint64_t dict_hash(const void *key, size_t len, const uint8_t seed[16]) {
+    return siphash((const uint8_t *)key, len, seed);
 }
 
 static int key_equal(const dict_entry *e, const void *key, size_t klen, uint64_t hash) {
@@ -31,9 +26,7 @@ dict *dict_create(void) {
     d->table = NULL;
     d->size = 0;
     d->used = 0;
-    /* Weak randomness is acceptable for an MVP; SipHash + getrandom() is the
-     * planned hardening. */
-    d->seed = (uint64_t)now_ms() ^ (uint64_t)(uintptr_t)d;
+    util_random_bytes(d->seed, sizeof(d->seed));
     return d;
 }
 

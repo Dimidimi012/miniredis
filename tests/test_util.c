@@ -1,4 +1,5 @@
 #include "util.h"
+#include "siphash.h"
 
 #include <stdio.h>
 
@@ -56,9 +57,22 @@ static void test_glob(void) {
     CHECK(!util_glob_match("file[0-9]", "filex", 5));
 }
 
+/* SipHash-2-4 known-answer test (published reference vector). */
+static void test_siphash(void) {
+    const uint8_t key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                             0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const uint8_t msg[15] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                             0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
+    CHECK(siphash(msg, sizeof(msg), key) == UINT64_C(0xa129ca6149be45e5));
+
+    /* empty message */
+    CHECK(siphash(msg, 0, key) != 0);   /* sanity: not the unkeyed zero */
+}
+
 int main(void) {
     test_string_to_ll();
     test_glob();
+    test_siphash();
 
     if (failures) {
         fprintf(stderr, "test_util: %d failure(s)\n", failures);

@@ -20,6 +20,11 @@ void log_error(const char *fmt, ...);
 /* ---- Wall-clock time in milliseconds since the Unix epoch ---- */
 int64_t now_ms(void);
 
+/* ---- Fill `buf` with `n` cryptographically random bytes (from
+ * /dev/urandom, with a non-cryptographic PRNG fallback that mixes time/pid/
+ * address if the device is unavailable). Used to seed keyed hashes. ---- */
+void util_random_bytes(void *buf, size_t n);
+
 /* ---- Strict string -> long long parsing.
  * Returns 1 on success, 0 otherwise. Rejects empty input, embedded non-digits
  * (a single leading '+'/'-' is allowed), and overflow. ---- */

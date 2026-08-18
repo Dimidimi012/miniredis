@@ -22,17 +22,17 @@ src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 # Unit tests (no networking required).
-tests/test_util: tests/test_util.c src/util.c src/util.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_util.c src/util.c
+tests/test_util: tests/test_util.c src/util.c src/util.h src/siphash.c src/siphash.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_util.c src/util.c src/siphash.c
 
-tests/test_dict: tests/test_dict.c src/dict.c src/dict.h src/util.c src/util.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_dict.c src/dict.c src/util.c
+tests/test_dict: tests/test_dict.c src/dict.c src/dict.h src/util.c src/util.h src/siphash.c src/siphash.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_dict.c src/dict.c src/util.c src/siphash.c
 
 tests/test_resp: tests/test_resp.c src/resp.c src/resp.h src/util.c src/util.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_resp.c src/resp.c src/util.c
 
-tests/test_skiplist: tests/test_skiplist.c src/zskiplist.c src/zskiplist.h src/dict.c src/dict.h src/util.c src/util.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_skiplist.c src/zskiplist.c src/dict.c src/util.c
+tests/test_skiplist: tests/test_skiplist.c src/zskiplist.c src/zskiplist.h src/dict.c src/dict.h src/util.c src/util.h src/siphash.c src/siphash.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_skiplist.c src/zskiplist.c src/dict.c src/util.c src/siphash.c
 
 # End-to-end client used by tests/integration.sh.
 tests/test_client: tests/test_client.c

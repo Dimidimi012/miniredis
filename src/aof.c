@@ -12,9 +12,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+static int64_t aof_last_fsync_ms = 0;
+
 int aof_open(const char *path) {
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) log_error("aof: open %s: %s", path, strerror(errno));
+    else aof_last_fsync_ms = now_ms();
     return fd;
 }
 
@@ -22,6 +25,15 @@ void aof_close(int fd) {
     if (fd < 0) return;
     if (fsync(fd) < 0) log_warn("aof: fsync: %s", strerror(errno));
     if (close(fd) < 0) log_warn("aof: close: %s", strerror(errno));
+}
+
+void aof_periodic(void) {
+    if (g_aof_fd < 0) return;
+    int64_t now = now_ms();
+    if (now - aof_last_fsync_ms >= 1000) {
+        if (fsync(g_aof_fd) < 0) log_warn("aof: fsync: %s", strerror(errno));
+        aof_last_fsync_ms = now;
+    }
 }
 
 static int write_full(int fd, const void *buf, size_t n) {

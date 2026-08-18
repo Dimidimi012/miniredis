@@ -16,7 +16,7 @@ typedef struct dict {
     dict_entry **table;
     size_t size;            /* number of buckets (power of two) */
     size_t used;            /* number of entries */
-    uint64_t seed;          /* randomized seed for the hash function */
+    uint8_t seed[16];       /* random 128-bit key for SipHash-2-4 */
 } dict;
 
 typedef struct {

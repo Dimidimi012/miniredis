@@ -17,10 +17,10 @@ target_include_directories(miniredis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 enable_testing()
 
-add_executable(test_util tests/test_util.c src/util.c)
-add_executable(test_dict tests/test_dict.c src/dict.c src/util.c)
+add_executable(test_util tests/test_util.c src/util.c src/siphash.c)
+add_executable(test_dict tests/test_dict.c src/dict.c src/util.c src/siphash.c)
 add_executable(test_resp tests/test_resp.c src/resp.c src/util.c)
-add_executable(test_skiplist tests/test_skiplist.c src/zskiplist.c src/dict.c src/util.c)
+add_executable(test_skiplist tests/test_skiplist.c src/zskiplist.c src/dict.c src/util.c src/siphash.c)
 add_executable(test_client tests/test_client.c)
 
 foreach(t util dict resp skiplist)
