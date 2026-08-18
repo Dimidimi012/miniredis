@@ -17,9 +17,13 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/epoll.h>
+#endif
 
-#define MAX_CLIENTS 1024
-#define READ_CHUNK  65536
+#define MAX_CLIENTS       1024
+#define READ_CHUNK        65536
+#define EPOLL_MAX_EVENTS  1024
 
 int64_t g_server_start_ms = 0;
 
@@ -38,6 +42,7 @@ void client_init(client *c, int fd) {
     dynbuf_init(&c->out);
     c->out_sent = 0;
     c->closing = 0;
+    c->events = 0;
 }
 
 void client_free(client *c) {
@@ -140,9 +145,12 @@ static int create_listener(const char *host, int port) {
     return fd;
 }
 
-/* ---- client I/O ---- */
+/* ---- client I/O (shared by both event loops) ----
+ * ep_fd is the epoll descriptor when running the epoll loop, or -1 when
+ * running the select loop. */
 
-static void accept_clients(int listen_fd, client ***clients, size_t *n, size_t *cap) {
+static void accept_clients(int listen_fd, int ep_fd,
+                           client ***clients, size_t *n, size_t *cap) {
     for (;;) {
         int fd = accept(listen_fd, NULL, NULL);
         if (fd < 0) {
@@ -152,8 +160,8 @@ static void accept_clients(int listen_fd, client ***clients, size_t *n, size_t *
             return;
         }
 
-        if (fd >= FD_SETSIZE) {
-            /* select() cannot watch this descriptor; refuse it. */
+        /* select() cannot watch descriptors beyond FD_SETSIZE. */
+        if (ep_fd < 0 && fd >= FD_SETSIZE) {
             close(fd);
             continue;
         }
@@ -175,6 +183,20 @@ static void accept_clients(int listen_fd, client ***clients, size_t *n, size_t *
         client *c = xmalloc(sizeof(*c));
         client_init(c, fd);
         (*clients)[(*n)++] = c;
+
+#ifdef __linux__
+        if (ep_fd >= 0) {
+            struct epoll_event ev;
+            ev.events = EPOLLIN;
+            ev.data.ptr = c;
+            if (epoll_ctl(ep_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+                log_warn("epoll_ctl ADD fd=%d: %s", fd, strerror(errno));
+                c->closing = 1;
+            } else {
+                c->events = EPOLLIN;
+            }
+        }
+#endif
     }
 }
 
@@ -240,34 +262,115 @@ static int write_client(client *c) {
     return 0;
 }
 
-static void compact_clients(client ***clients, size_t *n) {
+static void compact_clients(client ***clients, size_t *n, int ep_fd) {
+    (void)ep_fd;   /* only meaningful on Linux with the epoll loop */
     size_t w = 0;
     for (size_t i = 0; i < *n; i++) {
         client *c = (*clients)[i];
-        if (c->closing) client_free(c);
-        else (*clients)[w++] = c;
+        if (c->closing) {
+#ifdef __linux__
+            if (ep_fd >= 0) epoll_ctl(ep_fd, EPOLL_CTL_DEL, c->fd, NULL);
+#endif
+            client_free(c);
+        } else {
+            (*clients)[w++] = c;
+        }
     }
     *n = w;
 }
 
-/* ---- event loop ---- */
+#ifdef __linux__
+/* ---- epoll event loop ---- */
 
-int server_run(const char *host, int port) {
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
+static void client_update_epoll(int ep_fd, client *c) {
+    uint32_t want = EPOLLIN;
+    if (c->out.len > c->out_sent) want |= EPOLLOUT;
+    if (want == c->events) return;
 
-    g_server_start_ms = now_ms();
+    struct epoll_event ev;
+    ev.events = want;
+    ev.data.ptr = c;
+    if (epoll_ctl(ep_fd, EPOLL_CTL_MOD, c->fd, &ev) == 0) {
+        c->events = want;
+    } else {
+        log_warn("epoll_ctl MOD fd=%d: %s", c->fd, strerror(errno));
+    }
+}
 
-    db *store = db_create();
-    int listen_fd = create_listener(host, port);
-    if (listen_fd < 0) {
-        db_free(store);
+static int run_loop_epoll(db *store, int listen_fd) {
+    int ep_fd = epoll_create(1024);
+    if (ep_fd < 0) {
+        log_error("epoll_create: %s", strerror(errno));
         return 1;
     }
 
-    log_info("miniredis listening on %s:%d", host ? host : "0.0.0.0", port);
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.ptr = NULL;   /* NULL marks the listening socket */
+    if (epoll_ctl(ep_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+        log_error("epoll_ctl ADD listen: %s", strerror(errno));
+        close(ep_fd);
+        return 1;
+    }
 
+    client **clients = NULL;
+    size_t nclients = 0, cap = 0;
+    struct epoll_event events[EPOLL_MAX_EVENTS];
+
+    while (!g_stop) {
+        int n = epoll_wait(ep_fd, events, EPOLL_MAX_EVENTS, -1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            log_error("epoll_wait: %s", strerror(errno));
+            break;
+        }
+
+        for (int i = 0; i < n; i++) {
+            if (events[i].data.ptr == NULL) {
+                accept_clients(listen_fd, ep_fd, &clients, &nclients, &cap);
+                continue;
+            }
+
+            client *c = events[i].data.ptr;
+            if (c->closing) continue;
+
+            uint32_t fl = events[i].events;
+
+            if (fl & (EPOLLERR | EPOLLHUP)) {
+                if (!(fl & EPOLLIN)) {
+                    c->closing = 1;
+                    continue;
+                }
+                /* also readable: fall through to normal handling */
+            }
+
+            if (fl & EPOLLIN) {
+                if (read_client(c, store) < 0) c->closing = 1;
+                else client_update_epoll(ep_fd, c);
+            }
+            if (!c->closing && (fl & EPOLLOUT)) {
+                if (write_client(c) < 0) c->closing = 1;
+                else client_update_epoll(ep_fd, c);
+            }
+            if (c->closing && c->out_sent < c->out.len) {
+                /* Best-effort flush of a final reply (e.g. QUIT's +OK). */
+                (void)write_client(c);
+            }
+        }
+
+        compact_clients(&clients, &nclients, ep_fd);
+    }
+
+    for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
+    free(clients);
+    close(ep_fd);
+    return 0;
+}
+#endif /* __linux__ */
+
+/* ---- select event loop (portable fallback) ---- */
+
+static int run_loop_select(db *store, int listen_fd) {
     client **clients = NULL;
     size_t nclients = 0, cap = 0;
 
@@ -294,7 +397,7 @@ int server_run(const char *host, int port) {
         }
 
         if (FD_ISSET(listen_fd, &rset)) {
-            accept_clients(listen_fd, &clients, &nclients, &cap);
+            accept_clients(listen_fd, -1, &clients, &nclients, &cap);
         }
 
         for (size_t i = 0; i < nclients; i++) {
@@ -313,14 +416,48 @@ int server_run(const char *host, int port) {
             }
         }
 
-        compact_clients(&clients, &nclients);
+        compact_clients(&clients, &nclients, -1);
     }
-
-    log_info("shutting down");
 
     for (size_t i = 0; i < nclients; i++) client_free(clients[i]);
     free(clients);
+    return 0;
+}
+
+/* ---- entry point ---- */
+
+int server_run(const char *host, int port, const char *io_mode) {
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    g_server_start_ms = now_ms();
+
+    db *store = db_create();
+    int listen_fd = create_listener(host, port);
+    if (listen_fd < 0) {
+        db_free(store);
+        return 1;
+    }
+
+    log_info("miniredis listening on %s:%d (%s event loop)",
+             host ? host : "0.0.0.0", port, io_mode);
+
+    int rc;
+#ifdef __linux__
+    if (strcmp(io_mode, "epoll") == 0) {
+        rc = run_loop_epoll(store, listen_fd);
+    } else
+#endif
+    {
+        if (strcmp(io_mode, "epoll") == 0) {
+            log_warn("epoll is only available on Linux; using select");
+        }
+        rc = run_loop_select(store, listen_fd);
+    }
+
+    log_info("shutting down");
     close(listen_fd);
     db_free(store);
-    return 0;
+    return rc;
 }

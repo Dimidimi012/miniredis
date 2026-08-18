@@ -13,6 +13,7 @@ typedef struct client {
     dynbuf out;       /* pending output bytes */
     size_t out_sent;  /* bytes of `out` already handed to send() */
     int closing;      /* set when this client should be closed */
+    uint32_t events;  /* registered epoll events (epoll loop only) */
 } client;
 
 /* Set once at startup; used by INFO to report uptime. */
@@ -30,7 +31,8 @@ void reply_bulk_cstr(client *c, const char *s);
 void reply_null(client *c);
 void reply_array_header(client *c, size_t n);
 
-/* Runs the server; returns 0 on clean shutdown, non-zero on startup error. */
-int server_run(const char *host, int port);
+/* Runs the server. io_mode is "select" or "epoll" (the latter requires Linux).
+ * Returns 0 on clean shutdown, non-zero on startup error. */
+int server_run(const char *host, int port, const char *io_mode);
 
 #endif /* MINIREDIS_SERVER_H */

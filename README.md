@@ -62,7 +62,8 @@ MSYS2/MinGW）。
 make            # 构建 ./miniredis
 make test       # 单元测试 + 端到端测试
 ./miniredis --help
-./miniredis --bind 127.0.0.1 --port 6379
+./miniredis --bind 127.0.0.1 --port 6379          # 默认 epoll（Linux）
+./miniredis --io select --port 6380              # 显式切换 select 事件循环
 ```
 
 用官方客户端验证（推荐，最能体现"实用"）：
@@ -83,8 +84,10 @@ redis-benchmark -p 6379 -n 100000 -c 50 -t set,get
 
 ```text
                      ┌─────────────────────────────────────┐
-  redis-cli / 客户端 ──►│  server.c  单线程 select() 事件循环  │
-                     │   accept / 非阻塞 read / 非阻塞 write │
+  redis-cli / 客户端 ──►│  server.c  单线程事件循环           │
+                     │  Linux: epoll（默认）               │
+                     │  其他: select（跨平台回退）          │
+                     │  accept / 非阻塞 read / 非阻塞 write │
                      └───────────────────┬─────────────────┘
                                          │ 完整命令 (command)
                                          ▼
@@ -108,7 +111,7 @@ redis-benchmark -p 6379 -n 100000 -c 50 -t set,get
 
 | 文件 | 职责 |
 |---|---|
-| `src/server.c` | TCP 服务器、`select()` 事件循环、客户端读写缓冲、信号处理 |
+| `src/server.c` | TCP 服务器、epoll（Linux）/ select 事件循环、客户端读写缓冲、信号处理 |
 | `src/resp.c` | RESP 协议解析（增量、边界安全、上限保护） |
 | `src/db.c` | 键值存储、命令分发表、惰性过期、各命令实现 |
 | `src/dict.c` | 通用哈希表（`dict_set/get/delete` + 迭代器） |
@@ -143,15 +146,22 @@ make test              # 全部
 
 ## 性能说明
 
-当前 MVP 使用 `select()`，受 `FD_SETSIZE`（默认 1024）限制，单线程串行处理命令。
-`redis-benchmark` 下 SET/GET 通常可到数万 ~ 十几万 QPS（视机器而定）。这是**刻意保持
-简单**的起点，下一阶段替换为 `epoll`（Linux）事件循环后可支撑数万并发连接。
+实现了两套可切换的事件循环：**epoll**（Linux 默认）与 **select**（跨平台回退），
+通过 `--io select|epoll` 切换，方便直接对比基准。`select` 受 `FD_SETSIZE`（默认 1024）
+限制；epoll 可支撑数万并发连接。单线程串行处理命令，`redis-benchmark` 下 SET/GET
+通常可达数万 ~ 十几万 QPS（视机器而定）。
+
+```bash
+./miniredis --io select &   # 分别压测两套循环
+redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
+```
 
 ---
 
 ## Roadmap（后续迭代方向）
 
-- [ ] `epoll`/`kqueue` 事件循环（提升并发与吞吐）
+- [x] `epoll` 事件循环（Linux 默认）+ `select` 跨平台回退
+- [ ] `kqueue` 事件循环（macOS/BSD）
 - [ ] 持久化：AOF 追加日志 + RDB 快照、崩溃恢复
 - [ ] 更多数据类型：LIST / HASH / SET / ZSET（跳表实现排行榜）
 - [ ] 定期过期清理（当前仅惰性删除）+ 主动内存回收

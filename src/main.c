@@ -13,12 +13,14 @@ static void usage(const char *prog) {
             "Options:\n"
             "  --port N     listen port (default: 6379)\n"
             "  --bind HOST  bind address (default: 127.0.0.1; use 0.0.0.0 for all)\n"
+            "  --io MODE    event loop: epoll (Linux, default) or select\n"
             "  -h, --help   show this help and exit\n",
             prog);
 }
 
 int main(int argc, char **argv) {
     const char *host = "127.0.0.1";
+    const char *io_mode = NULL;
     int port = 6379;
 
     for (int i = 1; i < argc; i++) {
@@ -34,11 +36,25 @@ int main(int argc, char **argv) {
             port = (int)v;
         } else if (!strcmp(argv[i], "--bind") && i + 1 < argc) {
             host = argv[++i];
+        } else if (!strcmp(argv[i], "--io") && i + 1 < argc) {
+            io_mode = argv[++i];
         } else {
             usage(argv[0]);
             return 1;
         }
     }
 
-    return server_run(host, port);
+    if (!io_mode) {
+#ifdef __linux__
+        io_mode = "epoll";
+#else
+        io_mode = "select";
+#endif
+    }
+    if (strcmp(io_mode, "select") != 0 && strcmp(io_mode, "epoll") != 0) {
+        fprintf(stderr, "invalid --io mode: %s (expected select|epoll)\n", io_mode);
+        return 1;
+    }
+
+    return server_run(host, port, io_mode);
 }
