@@ -3,6 +3,7 @@
 #include "util.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 robj *robj_new_string(const char *s, size_t len) {
