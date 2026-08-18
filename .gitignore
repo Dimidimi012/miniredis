@@ -9,6 +9,9 @@ miniredis
 # editor config
 .vscode/
 
+# local MSVC verification shims (never committed)
+.msvc_check/
+
 # persistence data files
 *.aof
 *.rdb
