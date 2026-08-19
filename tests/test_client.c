@@ -1024,7 +1024,7 @@ static int run_full(int port, const char *host) {
         send_cmd(2, a);
         char *got = read_bulk();
         CHECK(got != NULL);
-        if (got) CHECK(strcmp(got, "hello Cworld") == 0);
+        if (got) CHECK(strcmp(got, "hello Corld") == 0);
         free(got);
     }
     {
