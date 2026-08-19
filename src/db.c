@@ -789,6 +789,10 @@ static void cmd_bgrewriteaof(db *store, client *c, command *cmd) {
         reply_error(c, "BGREWRITEAOF requires --aof FILE at startup");
         return;
     }
+    if (g_aof_rewriting) {
+        reply_error(c, "Background append only file rewriting already in progress");
+        return;
+    }
     pid_t pid = fork();
     if (pid < 0) {
         reply_error(c, "fork failed: could not start background rewrite");
