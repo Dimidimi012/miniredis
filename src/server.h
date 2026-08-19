@@ -14,6 +14,9 @@ typedef struct client {
     size_t out_sent;  /* bytes of `out` already handed to send() */
     int closing;      /* set when this client should be closed */
     uint32_t events;  /* registered epoll events (epoll loop only) */
+    int subscribed;   /* pubsub subscription count; >0 = subscribed mode */
+    int monitoring;   /* MONITOR mode: receives every command */
+    char peer[64];    /* "ip:port" of the peer, for MONITOR output */
 } client;
 
 /* Set once at startup; used by INFO to report uptime. */

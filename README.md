@@ -37,6 +37,8 @@ OK
 - **持久化**：AOF 追加日志（每条写命令落盘，**appendfsync everysec** 定时刷盘、重启重放）
   + RDB 快照（原子写入、`SAVE`/`BGSAVE`、优雅关停自动保存、启动自动加载）。
 - **内存防护**：客户端查询输入缓冲 64MB 上限，超限断开连接，防止慢/恶意客户端耗尽内存。
+- **消息与监控**：`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE`（订阅模式协议、多订阅者推送、
+  断线自动退订）+ `MONITOR`（命令监控流）。
 - **过期机制**：`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`/`SET ... EX/PX`；
   **惰性删除 + 主动过期**（事件循环 10Hz 周期采样扫描并删除过期键，不依赖访问触发），
   精确到毫秒。
@@ -47,7 +49,7 @@ OK
 
 | 类别 | 命令 |
 |---|---|
-| 连接 | `PING` `ECHO` `QUIT` `SELECT` |
+| 连接 | `PING` `ECHO` `QUIT` `SELECT` `SUBSCRIBE` `UNSUBSCRIBE` `PUBLISH` |
 | 字符串 | `SET`（含 `EX/PX/EXAT/PXAT/NX/XX`）`GET` `MGET` `MSET` `SETNX` `SETEX` `GETSET` `APPEND` `STRLEN` `GETRANGE` `SETRANGE` `RENAME` `INCR` `DECR` |
 | 键 | `DEL` `EXISTS` `TYPE` `KEYS`（glob 匹配） |
 | 过期 | `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT` `TTL` `PTTL` |
@@ -55,7 +57,7 @@ OK
 | 哈希 | `HSET` `HMSET` `HGET` `HMGET` `HGETALL` `HKEYS` `HVALS` `HLEN` `HEXISTS` `HDEL` `HSETNX` `HINCRBY` `HINCRBYFLOAT` |
 | 集合 | `SADD` `SREM` `SISMEMBER` `SCARD` `SMEMBERS` `SPOP` `SINTER` `SUNION` `SDIFF` |
 | 有序集合 | `ZADD`（含 `NX/XX/CH/INCR`）`ZCARD` `ZSCORE` `ZREM` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE`（含 `WITHSCORES`/`LIMIT`）`ZRANK` `ZREVRANK` `ZINCRBY` `ZCOUNT` |
-| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` `REWRITEAOF` `BGREWRITEAOF` |
+| 服务器 | `INFO` `DBSIZE` `FLUSHALL` `COMMAND` `SAVE` `BGSAVE` `REWRITEAOF` `BGREWRITEAOF` `MONITOR` |
 
 未实现的命令会返回标准错误：`-ERR unknown command '...'`。
 
@@ -204,10 +206,12 @@ redis-benchmark -p 6379 -n 100000 -c 100 -t set,get
 - [x] AOF 重写（REWRITEAOF / BGREWRITEAOF，重写期间写入不丢失）
 - [x] 抗哈希洪水攻击：SipHash-2-4 + `/dev/urandom` 真随机种子
 - [x] 定期过期清理（事件循环 10Hz 主动扫描，替代纯惰性删除）
+- [x] `MONITOR` 命令监控流、`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE` 发布订阅
+- [ ] `PSUBSCRIBE`/`PUNSUBSCRIBE`（频道模式订阅）
 - [ ] `appendfsync always` 策略
 - [ ] `kqueue` 事件循环（macOS/BSD）
 - [ ] 主动内存回收（内存压力下的 LRU 逐出）
-- [ ] 主从复制、`MONITOR`、`PUB/SUB`
+- [ ] 主从复制、`SCRIPT`、`EVAL`（Lua）
 
 ---
 

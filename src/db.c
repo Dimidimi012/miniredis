@@ -26,13 +26,30 @@ db *db_create(void) {
     db *s = xmalloc(sizeof(*s));
     s->d = dict_create();
     s->expire_cursor = 0;
+    s->ps = pubsub_create();
+    s->monitors = list_create();
     return s;
 }
 
 void db_free(db *s) {
     if (!s) return;
     dict_free(s->d, free_obj);
+    pubsub_free(s->ps);
+    list_free(s->monitors, NULL);   /* clients are owned by the server */
     free(s);
+}
+
+void db_client_disconnect(db *store, client *c) {
+    if (c->subscribed > 0) pubsub_unsubscribe_all(store->ps, c);
+    if (c->monitoring && store->monitors) {
+        for (list_node *n = list_first(store->monitors); n; n = list_next(n)) {
+            if (n->val == (void *)c) {
+                (void)list_detach(store->monitors, n);
+                break;
+            }
+        }
+        c->monitoring = 0;
+    }
 }
 
 size_t db_size(const db *s) {
@@ -166,6 +183,19 @@ static void cmd_ping(db *store, client *c, command *cmd) {
     (void)store;
     if (cmd->argc > 2) {
         reply_error(c, "wrong number of arguments for 'ping' command");
+        return;
+    }
+    if (c->subscribed > 0) {
+        /* subscribed clients get the array form: *2 $4 pong $len <msg> */
+        if (cmd->argc == 2) {
+            const char *m = cmd->argv[1];
+            size_t ml = strlen(m);
+            dynbuf_appendf(&c->out, "*2\r\n$4\r\npong\r\n$%zu\r\n", ml);
+            dynbuf_append(&c->out, m, ml);
+            dynbuf_append_cstr(&c->out, "\r\n");
+        } else {
+            dynbuf_append_cstr(&c->out, "*2\r\n$4\r\npong\r\n$0\r\n\r\n");
+        }
         return;
     }
     if (cmd->argc == 2) reply_bulk_cstr(c, cmd->argv[1]);
@@ -721,6 +751,119 @@ static void cmd_quit(db *store, client *c, command *cmd) {
     (void)cmd;
     reply_simple(c, "OK");
     c->closing = 1;
+}
+
+/* ---- pub/sub ---- */
+
+static void subscribe_frame(client *c, const char *kind, size_t kindlen,
+                            const char *chan, size_t chlen, int count) {
+    dynbuf_appendf(&c->out, "*3\r\n$%zu\r\n", kindlen);
+    dynbuf_append(&c->out, kind, kindlen);
+    dynbuf_appendf(&c->out, "\r\n$%zu\r\n", chlen);
+    dynbuf_append(&c->out, chan, chlen);
+    dynbuf_appendf(&c->out, "\r\n:%d\r\n", count);
+}
+
+static void cmd_subscribe(db *store, client *c, command *cmd) {
+    if (cmd->argc < 2) {
+        reply_error(c, "wrong number of arguments for 'subscribe' command");
+        return;
+    }
+    for (int i = 1; i < cmd->argc; i++) {
+        const char *chan = cmd->argv[i];
+        size_t chlen = strlen(chan);
+        int count = pubsub_subscribe(store->ps, c, chan, chlen);
+        subscribe_frame(c, "subscribe", 9, chan, chlen, count);
+    }
+}
+
+static void unsub_all_frame(void *ctx, client *c, const char *chan, size_t chlen, int count) {
+    int *replied = (int *)ctx;
+    subscribe_frame(c, "unsubscribe", 11, chan, chlen, count);
+    *replied = 1;
+}
+
+static void cmd_unsubscribe(db *store, client *c, command *cmd) {
+    /* UNSUBSCRIBE with no arguments: leave every channel */
+    if (cmd->argc == 1) {
+        int replied = 0;
+        pubsub_unsubscribe_channels(store->ps, c, unsub_all_frame, &replied);
+        if (!replied) {
+            /* Redis replies once with a null channel */
+            dynbuf_append_cstr(&c->out,
+                "*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n");
+        }
+        return;
+    }
+
+    for (int i = 1; i < cmd->argc; i++) {
+        const char *chan = cmd->argv[i];
+        size_t chlen = strlen(chan);
+        int count = pubsub_unsubscribe(store->ps, c, chan, chlen);
+        subscribe_frame(c, "unsubscribe", 11, chan, chlen, count);
+    }
+}
+
+static void cmd_publish(db *store, client *c, command *cmd) {
+    if (cmd->argc != 3) {
+        reply_error(c, "wrong number of arguments for 'publish' command");
+        return;
+    }
+    int receivers = pubsub_publish(store->ps, cmd->argv[1], strlen(cmd->argv[1]),
+                                   cmd->argv[2], strlen(cmd->argv[2]));
+    reply_integer(c, receivers);
+}
+
+/* ---- MONITOR ---- */
+
+static int list_has(const list *l, const void *v) {
+    for (const list_node *n = list_first(l); n; n = list_next(n)) {
+        if (n->val == v) return 1;
+    }
+    return 0;
+}
+
+static void append_quoted(dynbuf *out, const char *s, size_t n) {
+    dynbuf_append_cstr(out, "\"");
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '"' || s[i] == '\\') dynbuf_append_cstr(out, "\\");
+        dynbuf_append(out, &s[i], 1);
+    }
+    dynbuf_append_cstr(out, "\"");
+}
+
+/* Push a monitor line for `cmd` (executed by client `c`) to every MONITOR
+ * client. Format (Redis-style): +<sec>.<usec> [<db> <peer>] "cmd" "arg"... */
+static void feed_monitors(db *store, client *c, command *cmd) {
+    if (!store->monitors || list_len(store->monitors) == 0) return;
+
+    dynbuf b;
+    dynbuf_init(&b);
+    int64_t ms = now_ms();
+    dynbuf_appendf(&b, "+%lld.%06lld [0 %s]",
+                   (long long)(ms / 1000), (long long)((ms % 1000) * 1000),
+                   c->peer);
+    for (int i = 0; i < cmd->argc; i++) {
+        dynbuf_append_cstr(&b, " ");
+        append_quoted(&b, cmd->argv[i], strlen(cmd->argv[i]));
+    }
+    dynbuf_append_cstr(&b, "\r\n");
+
+    for (list_node *n = list_first(store->monitors); n; n = list_next(n)) {
+        client *m = (client *)n->val;
+        dynbuf_append(&m->out, b.p, b.len);
+    }
+    dynbuf_free(&b);
+}
+
+static void cmd_monitor(db *store, client *c, command *cmd) {
+    if (cmd->argc != 1) {
+        reply_error(c, "wrong number of arguments for 'monitor' command");
+        return;
+    }
+    if (!list_has(store->monitors, c)) list_push_tail(store->monitors, c);
+    c->monitoring = 1;
+    reply_simple(c, "OK");
 }
 
 static void cmd_save(db *store, client *c, command *cmd) {
@@ -2131,6 +2274,10 @@ static const cmd_entry commands[] = {
     {"echo",        0, cmd_echo},
     {"select",      0, cmd_select},
     {"quit",        0, cmd_quit},
+    {"subscribe",   0, cmd_subscribe},
+    {"unsubscribe", 0, cmd_unsubscribe},
+    {"publish",     0, cmd_publish},
+    {"monitor",     0, cmd_monitor},
 
     {"set",         1, cmd_set},
     {"get",         0, cmd_get},
@@ -2217,10 +2364,26 @@ static const cmd_entry commands[] = {
     {"bgrewriteaof", 0, cmd_bgrewriteaof},
 };
 
+static int allowed_in_subscribed(const char *name) {
+    return !strcasecmp(name, "subscribe") || !strcasecmp(name, "unsubscribe") ||
+           !strcasecmp(name, "ping") || !strcasecmp(name, "quit");
+}
+
 void dispatch_command(db *store, client *c, command *cmd) {
     if (cmd->argc == 0) return;
 
     const char *name = cmd->argv[0];
+
+    /* subscribed clients may only run a small set of commands */
+    if (c->subscribed > 0 && !allowed_in_subscribed(name)) {
+        reply_error(c,
+            "only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context");
+        return;
+    }
+
+    /* MONITOR clients observe every command as it arrives */
+    feed_monitors(store, c, cmd);
+
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
         if (!strcasecmp(commands[i].name, name)) {
             /* Log mutating commands to the AOF before executing them, so that a

@@ -73,6 +73,9 @@ void client_init(client *c, int fd) {
     c->out_sent = 0;
     c->closing = 0;
     c->events = 0;
+    c->subscribed = 0;
+    c->monitoring = 0;
+    c->peer[0] = '\0';
 }
 
 void client_free(client *c) {
@@ -212,6 +215,18 @@ static void accept_clients(int listen_fd, int ep_fd,
 
         client *c = xmalloc(sizeof(*c));
         client_init(c, fd);
+        /* record the peer address for MONITOR output */
+        {
+            struct sockaddr_in peer;
+            socklen_t plen = sizeof(peer);
+            if (getpeername(fd, (struct sockaddr *)&peer, &plen) == 0) {
+                char ip[64];
+                if (inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip))) {
+                    snprintf(c->peer, sizeof(c->peer), "%s:%d",
+                             ip, (int)ntohs(peer.sin_port));
+                }
+            }
+        }
         (*clients)[(*n)++] = c;
 
 #ifdef __linux__
@@ -300,7 +315,7 @@ static int write_client(client *c) {
     return 0;
 }
 
-static void compact_clients(client ***clients, size_t *n, int ep_fd) {
+static void compact_clients(client ***clients, size_t *n, int ep_fd, db *store) {
     (void)ep_fd;   /* only meaningful on Linux with the epoll loop */
     size_t w = 0;
     for (size_t i = 0; i < *n; i++) {
@@ -309,6 +324,9 @@ static void compact_clients(client ***clients, size_t *n, int ep_fd) {
 #ifdef __linux__
             if (ep_fd >= 0) epoll_ctl(ep_fd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
+            /* drop the client from pubsub channels / monitor list so their
+             * pointers never dangle (a later PUBLISH would touch freed memory) */
+            db_client_disconnect(store, c);
             client_free(c);
         } else {
             (*clients)[w++] = c;
@@ -398,7 +416,7 @@ static int run_loop_epoll(db *store, int listen_fd) {
             }
         }
 
-        compact_clients(&clients, &nclients, ep_fd);
+        compact_clients(&clients, &nclients, ep_fd, store);
         db_expire_cycle(store);
         aof_periodic();
         reap_children();
@@ -462,7 +480,7 @@ static int run_loop_select(db *store, int listen_fd) {
             }
         }
 
-        compact_clients(&clients, &nclients, -1);
+        compact_clients(&clients, &nclients, -1, store);
         db_expire_cycle(store);
         aof_periodic();
         reap_children();

@@ -56,7 +56,7 @@ static char *read_line(int fd) {
     }
 }
 
-static void send_cmd(int argc, const char **argv) {
+static void send_cmd_fd(int fd, int argc, const char **argv) {
     char tmp[2048];
     int off = snprintf(tmp, sizeof(tmp), "*%d\r\n", argc);
     for (int i = 0; i < argc; i++) {
@@ -69,17 +69,25 @@ static void send_cmd(int argc, const char **argv) {
             tmp[off++] = '\n';
         }
     }
-    (void)send(conn, tmp, (size_t)off, 0);
+    (void)send(fd, tmp, (size_t)off, 0);
 }
 
-static void expect_simple(const char *expected) {
-    char *line = read_line(conn);
+static void send_cmd(int argc, const char **argv) {
+    send_cmd_fd(conn, argc, argv);
+}
+
+static void expect_simple_fd(int fd, const char *expected) {
+    char *line = read_line(fd);
     CHECK(line != NULL);
     if (line) CHECK(strcmp(line, expected) == 0);
 }
 
-static long long read_integer(void) {
-    char *line = read_line(conn);
+static void expect_simple(const char *expected) {
+    expect_simple_fd(conn, expected);
+}
+
+static long long read_integer_fd(int fd) {
+    char *line = read_line(fd);
     if (!line || line[0] != ':') {
         failures++;
         return LLONG_MIN;
@@ -87,9 +95,13 @@ static long long read_integer(void) {
     return atoll(line + 1);
 }
 
+static long long read_integer(void) {
+    return read_integer_fd(conn);
+}
+
 /* Returns a malloc'd payload, or NULL for a null bulk reply. */
-static char *read_bulk(void) {
-    char *line = read_line(conn);
+static char *read_bulk_fd(int fd) {
+    char *line = read_line(fd);
     if (!line || line[0] != '$') {
         failures++;
         return NULL;
@@ -98,7 +110,7 @@ static char *read_bulk(void) {
     if (n < 0) return NULL;
 
     char *payload = malloc((size_t)n + 1);
-    if (read_all(conn, payload, (size_t)n) != 0) {
+    if (read_all(fd, payload, (size_t)n) != 0) {
         free(payload);
         failures++;
         return NULL;
@@ -106,12 +118,16 @@ static char *read_bulk(void) {
     payload[n] = '\0';
 
     char crlf[2];
-    if (read_all(conn, crlf, 2) != 0 || crlf[0] != '\r' || crlf[1] != '\n') {
+    if (read_all(fd, crlf, 2) != 0 || crlf[0] != '\r' || crlf[1] != '\n') {
         free(payload);
         failures++;
         return NULL;
     }
     return payload;
+}
+
+static char *read_bulk(void) {
+    return read_bulk_fd(conn);
 }
 
 /* Read an array reply of bulk strings. Returns a malloc'd array of malloc'd
@@ -496,6 +512,166 @@ static int run_biginput(int port, const char *host) {
         return 1;
     }
     printf("test_client[biginput]: server closed an oversized request\n");
+    return 0;
+}
+
+/* Read a pubsub frame: *3 bulk(kind) bulk(channel) [:<count>]. When count<0,
+ * the trailing integer is not expected (message pushes end with a payload
+ * bulk that the caller reads separately). Returns 1 on success. */
+static int expect_frame(int fd, const char *kind, const char *chan, int count) {
+    char *l = read_line(fd);
+    if (!l || strcmp(l, "*3") != 0) {
+        failures++;
+        return 0;
+    }
+    char *k = read_bulk_fd(fd);
+    if (!k || strcmp(k, kind) != 0) {
+        failures++;
+        free(k);
+        return 0;
+    }
+    free(k);
+    char *c = read_bulk_fd(fd);
+    if (!c || strcmp(c, chan) != 0) {
+        failures++;
+        free(c);
+        return 0;
+    }
+    free(c);
+    if (count >= 0 && read_integer_fd(fd) != count) {
+        failures++;
+        return 0;
+    }
+    return 1;
+}
+
+static int run_pubsub(int port, const char *host) {
+    int sub1 = connect_retry(port, host);
+    int sub2 = connect_retry(port, host);
+    int pub = connect_retry(port, host);
+    CHECK(sub1 >= 0 && sub2 >= 0 && pub >= 0);
+    if (sub1 < 0 || sub2 < 0 || pub < 0) return 1;
+
+    /* two subscribers on the same channel */
+    {
+        const char *a[] = {"SUBSCRIBE", "ch1"};
+        send_cmd_fd(sub1, 2, a);
+        CHECK(expect_frame(sub1, "subscribe", "ch1", 1));
+    }
+    {
+        const char *a[] = {"SUBSCRIBE", "ch1"};
+        send_cmd_fd(sub2, 2, a);
+        CHECK(expect_frame(sub2, "subscribe", "ch1", 1));
+    }
+    /* a publish reaches both subscribers */
+    {
+        const char *a[] = {"PUBLISH", "ch1", "hello"};
+        send_cmd_fd(pub, 3, a);
+        CHECK(read_integer_fd(pub) == 2);
+    }
+    {
+        CHECK(expect_frame(sub1, "message", "ch1", -1));
+        char *p = read_bulk_fd(sub1);
+        CHECK(p != NULL);
+        if (p) CHECK(strcmp(p, "hello") == 0);
+        free(p);
+    }
+    {
+        CHECK(expect_frame(sub2, "message", "ch1", -1));
+        char *p = read_bulk_fd(sub2);
+        CHECK(p != NULL);
+        if (p) CHECK(strcmp(p, "hello") == 0);
+        free(p);
+    }
+    /* unsubscribe one subscriber */
+    {
+        const char *a[] = {"UNSUBSCRIBE", "ch1"};
+        send_cmd_fd(sub1, 2, a);
+        CHECK(expect_frame(sub1, "unsubscribe", "ch1", 0));
+    }
+    /* a publish now reaches only sub2 */
+    {
+        const char *a[] = {"PUBLISH", "ch1", "world"};
+        send_cmd_fd(pub, 3, a);
+        CHECK(read_integer_fd(pub) == 1);
+    }
+    {
+        CHECK(expect_frame(sub2, "message", "ch1", -1));
+        char *p = read_bulk_fd(sub2);
+        CHECK(p != NULL);
+        if (p) CHECK(strcmp(p, "world") == 0);
+        free(p);
+    }
+    /* subscribed-mode restrictions: non-whitelisted commands are rejected */
+    {
+        const char *a[] = {"GET", "foo"};
+        send_cmd_fd(sub2, 2, a);
+        char *line = read_line(sub2);
+        CHECK(line != NULL);
+        if (line) CHECK(strncmp(line, "-ERR", 4) == 0);
+    }
+    /* PING in subscribed mode returns the array form */
+    {
+        const char *a[] = {"PING"};
+        send_cmd_fd(sub2, 1, a);
+        char *line = read_line(sub2);
+        CHECK(line != NULL);
+        if (line) CHECK(strcmp(line, "*2") == 0);
+        char *k = read_bulk_fd(sub2);
+        CHECK(k != NULL);
+        if (k) CHECK(strcmp(k, "pong") == 0);
+        free(k);
+        char *e = read_bulk_fd(sub2);
+        CHECK(e != NULL && e[0] == '\0');
+        free(e);
+    }
+
+    close(sub1);
+    close(sub2);
+    close(pub);
+    if (failures) {
+        fprintf(stderr, "test_client[pubsub]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[pubsub]: subscribe/publish/unsubscribe verified\n");
+    return 0;
+}
+
+static int run_monitor(int port, const char *host) {
+    int mon = connect_retry(port, host);
+    int w = connect_retry(port, host);
+    CHECK(mon >= 0 && w >= 0);
+    if (mon < 0 || w < 0) return 1;
+
+    {
+        const char *a[] = {"MONITOR"};
+        send_cmd_fd(mon, 1, a);
+        expect_simple_fd(mon, "+OK");
+    }
+    {
+        const char *a[] = {"SET", "mkey", "mval"};
+        send_cmd_fd(w, 3, a);
+        expect_simple_fd(w, "+OK");
+    }
+    {
+        /* the monitor client sees the command line */
+        char *line = read_line(mon);
+        CHECK(line != NULL);
+        if (line) {
+            CHECK(line[0] == '+');
+            CHECK(strstr(line, "\"SET\"") != NULL);
+            CHECK(strstr(line, "\"mkey\"") != NULL);
+            CHECK(strstr(line, "\"mval\"") != NULL);
+        }
+    }
+
+    close(mon);
+    close(w);
+    if (failures) {
+        fprintf(stderr, "test_client[monitor]: %d failure(s)\n", failures);
+        return 1;
+    }
+    printf("test_client[monitor]: monitor stream verified\n");
     return 0;
 }
 
@@ -1166,5 +1342,7 @@ int main(int argc, char **argv) {
     if (strcmp(phase, "rewrite") == 0) return run_rewrite(port, host);
     if (strcmp(phase, "biginput") == 0) return run_biginput(port, host);
     if (strcmp(phase, "expire") == 0) return run_expire(port, host);
+    if (strcmp(phase, "pubsub") == 0) return run_pubsub(port, host);
+    if (strcmp(phase, "monitor") == 0) return run_monitor(port, host);
     return run_full(port, host);
 }
